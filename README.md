@@ -68,6 +68,7 @@ See [`SPEC.md` §10](SPEC.md). Highest-priority: the Hermes IPC contract that th
 - **2026-05-03:** tenth slice — `instance_create.py` (per-agent runtime config + cloud instance registration, per §6.5). Inherits `A365_APP_ID`/`A365_TENANT_ID`/`A365_CLI_VARIANT`/`HERMES_OTLP_ENDPOINT` from `~/.hermes/.env`. Existing `AA_INSTANCE_ID` is preserved across re-runs (idempotency); business-hours fields from a prior run are also preserved unless overridden. Atomically writes `~/.hermes/agents/<slug>/.env` (still no `A365_APP_PASSWORD` per spec). New `Mutator.create_instance` op drives `a365 create-instance --blueprint=<slug> --instance=<UUID>`; cloud step is skipped if the instance is already registered. Plan distinguishes `create` (fresh local + cloud), `create-cloud-only` (local id exists but cloud missing), and `noop`.
 - **2026-05-03:** eleventh slice — `deploy.py` (channel deployment for Teams / Outlook / M365 Copilot, per §6.9). Reads `AA_INSTANCE_ID` from the agent .env, queries the instance's currently-bound channels (state == `ok`), and computes a set diff against the desired list. New `Mutator.deploy` op hands the desired absolute set to `a365 deploy --instance=<id> --channels=<list>`; A365 reconciles additions/removals server-side. Empty desired list = unbind all. Idempotent: same set → noop, no mutator call. Surfaces deep-links from the response when present.
 - **2026-05-03:** twelfth slice — `workiq.py` (toggle Work IQ MCP exposure, per §6.6). Config-only — no local MCP server runs. Reads the cached blueprint at `~/.hermes/agents/<slug>/blueprint.json`, reconstitutes `BlueprintInputs`, applies `--enable`/`--disable`/`--set` to the workiq tool list, and delegates to `blueprint_create`'s pipeline so the underlying reconciler decides create vs patch. `--set` is mutually exclusive with the additive flags; unknown tool names are rejected up-front against the `WORKIQ_TOOLS` constant.
+- **2026-05-03:** thirteenth slice — `telemetry.py` (read-only OTLP / span verifier, per §6.8). Three checks: `HERMES_OTLP_ENDPOINT` set in agent .env, `AA_INSTANCE_ID` recorded, last span seen via `QuerySource.query_telemetry`. JSON output by default, `--human` for a markdown table. Exit codes mirror `status` (0 ok / 1 partial / 2 broken). Span injection itself is the activity bridge's responsibility (§6.7); this command only verifies the pipeline.
 
 ## Development
 
@@ -131,8 +132,9 @@ uv run python scripts/render_instance_env.py \
 | `instance_create.py` (per-agent .env + cloud instance; §6.5) | done |
 | `deploy.py` (channel set reconciliation; §6.9) | done |
 | `workiq.py` (toggle Work IQ MCP exposure; §6.6) | done |
+| `telemetry.py` (OTLP / span verifier; §6.8) | done |
 | `activity_bridge.py` | TODO (blocked on §10 Q1 — Hermes IPC contract) |
-| `telemetry`, `fic rotate`, `cleanup` | TODO (will compose existing reconcilers + secrets + status helpers) |
+| `fic rotate`, `cleanup` | TODO (will compose existing reconcilers + secrets + status helpers) |
 | `references/` content | TODO |
 | `SKILL.md` (drafted here, upstreamed later) | TODO |
 
@@ -265,6 +267,14 @@ uv run python scripts/workiq.py inbox-helper --disable=teams --apply
 
 # Replace the whole list
 uv run python scripts/workiq.py inbox-helper --set=mail,calendar --apply
+```
+
+Telemetry verifier (read-only):
+
+```bash
+uv run python scripts/telemetry.py inbox-helper --human    # markdown table
+uv run python scripts/telemetry.py inbox-helper            # JSON
+echo $?                                                    # 0=ok, 1=partial, 2=broken
 ```
 
 ## License
