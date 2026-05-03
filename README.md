@@ -64,6 +64,7 @@ See [`SPEC.md` §10](SPEC.md). Highest-priority: the Hermes IPC contract that th
 - **2026-05-03:** sixth slice — Adaptive Card v1.6 templates (`greeting`, `confirmation`, `error`) under `templates/adaptive-cards/` plus `emit_card.py` builder with typed dataclass inputs. Golden-file tests verify JSON validity and round-trip stability.
 - **2026-05-03:** seventh slice — `license.py` (read-only recommendation per §6.1) and `consent.py` (admin-consent URL rendering + grant polling per §6.3) plus the `consent-url.txt.j2` template. The polling loop is fully testable via monkeypatched `time.sleep`/`time.monotonic`.
 - **2026-05-03:** eighth slice — `register.py` (Entra T1+T2 app registration and user-FIC, per §6.2). Composes `reconcile_app` plans with a new `Mutator` protocol (default `A365CliMutator` shells out; tests inject a `FakeMutator`). Default dry-run; `--apply` executes. AADSTS500011 retries with backoff (mockable `sleep_fn`); AADSTS90094 surfaces a `consent` follow-up rather than failing. T2 client secret stored via the keychain wrapper (never to disk). `~/.hermes/.env` updated atomically (tmp + rename) with `A365_TENANT_ID`, `A365_APP_ID`, optional `A365_CLI_VARIANT`. `QuerySource` gained `query_app_by_name` to support name-based lookup.
+- **2026-05-03:** ninth slice — `blueprint_create.py` (register/patch an A365 agent blueprint, per §6.4). Composes `render_blueprint` and `reconcile_blueprint` with a new `Mutator.setup_blueprint` operation. Default dry-run renders to a tmp file and prints the plan + diff; `--apply` hands the tmp file to the CLI and atomically caches the rendered JSON at `~/.hermes/agents/<slug>/blueprint.json`. Server-assigned fields (`blueprintId`, `lastPatched`, `etag`, etc.) are stripped from the actual payload before diffing so noop plans aren't perturbed. Slug mismatches abort; `BlueprintCreateError` surfaces refusals.
 
 ## Development
 
@@ -123,8 +124,9 @@ uv run python scripts/render_instance_env.py \
 | Consent URL template + `consent.py` (URL render + grant poll; §6.3) | done |
 | `license.py` (recommendation engine; §6.1) | done |
 | `register.py` (Entra T1+T2 app + user-FIC; §6.2) | done |
+| `blueprint_create.py` (register/patch agent blueprint; §6.4) | done |
 | `activity_bridge.py` | TODO (blocked on §10 Q1 — Hermes IPC contract) |
-| `blueprint create`, `instance create`, `deploy`, `workiq`, `telemetry`, `fic rotate`, `cleanup` | TODO (will compose existing reconcilers + secrets + status helpers) |
+| `instance create`, `deploy`, `workiq`, `telemetry`, `fic rotate`, `cleanup` | TODO (will compose existing reconcilers + secrets + status helpers) |
 | `references/` content | TODO |
 | `SKILL.md` (drafted here, upstreamed later) | TODO |
 
@@ -198,6 +200,23 @@ uv run python scripts/register.py \
     --app-name "Hermes Inbox Agent" \
     --tenant-id contoso.onmicrosoft.com \
     --cli-variant a365-dotnet \
+    --apply
+```
+
+Blueprint registration (default dry-run; `--apply` to register/patch):
+
+```bash
+# Plan only — renders to a tmp file, prints diff vs cloud actual
+uv run python scripts/blueprint_create.py inbox-helper \
+    --description "Summarises unread mail" \
+    --purpose productivity \
+    --workiq mail,calendar
+
+# Execute the plan
+uv run python scripts/blueprint_create.py inbox-helper \
+    --description "Summarises unread mail" \
+    --purpose productivity \
+    --workiq mail,calendar \
     --apply
 ```
 

@@ -92,6 +92,7 @@ class Mutator(Protocol):
 
     def setup_app(self, *, tier: int, name: str) -> dict[str, Any]: ...
     def fic_configure(self, *, app_id: str) -> None: ...
+    def setup_blueprint(self, *, file_path: Path) -> dict[str, Any]: ...
 
 
 class A365CliMutator:
@@ -139,6 +140,12 @@ class A365CliMutator:
         if not self.available:
             raise RuntimeError("a365 CLI not on PATH; cannot configure FIC")
         self._run(["a365", "fic", "configure", f"--app={app_id}"])
+
+    def setup_blueprint(self, *, file_path: Path) -> dict[str, Any]:
+        if not self.available:
+            raise RuntimeError("a365 CLI not on PATH; cannot run setup blueprint")
+        out = self._run(["a365", "setup", "blueprint", f"--file={file_path}", "--output=json"])
+        return _extract_json_object(out)
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
