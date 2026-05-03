@@ -96,6 +96,7 @@ class Mutator(Protocol):
     def setup_blueprint(self, *, file_path: Path) -> dict[str, Any]: ...
     def create_instance(self, *, blueprint_slug: str, instance_id: str) -> dict[str, Any]: ...
     def deploy(self, *, instance_id: str, channels: list[str]) -> dict[str, Any]: ...
+    def cleanup(self, *, kind: str, identifier: str) -> None: ...
 
 
 class A365CliMutator:
@@ -183,6 +184,26 @@ class A365CliMutator:
             ]
         )
         return _extract_json_object(out)
+
+    def cleanup(self, *, kind: str, identifier: str) -> None:
+        """Run ``a365 cleanup <kind> --<flag>=<identifier>``.
+
+        ``kind`` is one of ``deployment``/``instance``/``blueprint``/``app``;
+        the flag name follows the same kind, with ``deployment`` mapped to
+        ``--instance`` (the deployment is identified by its instance id).
+        """
+        if not self.available:
+            raise RuntimeError("a365 CLI not on PATH; cannot run cleanup")
+        flag_map = {
+            "deployment": "--instance",
+            "instance": "--instance",
+            "blueprint": "--slug",
+            "app": "--app",
+        }
+        flag = flag_map.get(kind)
+        if flag is None:
+            raise ValueError(f"unknown cleanup kind: {kind!r}")
+        self._run(["a365", "cleanup", kind, f"{flag}={identifier}"])
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
