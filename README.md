@@ -60,6 +60,7 @@ See [`SPEC.md` §10](SPEC.md). Highest-priority: the Hermes IPC contract that th
 - **2026-05-03:** second slice — `doctor.py` (read-only environment probe; resolves §10 Q7 — `atk` vs `a365` variant detection).
 - **2026-05-03:** third slice — `secrets.py` (OS-keychain wrapper; resolves §10 Q3 — macOS `security` and Linux `secret-tool`).
 - **2026-05-03:** fourth slice — reconcilers (`deep_diff` in `_common.py`, `reconcile_app.py`, `reconcile_blueprint.py`) producing `create`/`noop`/`patch`/`abort` plans against captured `a365 query-entra` JSON.
+- **2026-05-03:** fifth slice — `status.py` orchestrating nine components (license, T1/T2 apps, blueprint, instance, channels, activity bridge, telemetry, FIC) into a single report; exit codes 0/1/2/3 per spec. `QuerySource` Protocol abstracts `a365 query-entra` so the command works end-to-end with or without a live `a365` CLI.
 
 ## Development
 
@@ -114,9 +115,9 @@ uv run python scripts/render_instance_env.py \
 | `doctor.py` (env probe — resolves §10 Q7) | done |
 | `secrets.py` (OS-keychain wrapper — resolves §10 Q3) | done |
 | `reconcile_app.py`, `reconcile_blueprint.py` (idempotent diff/plan) | done |
+| `status.py` (per-component report; resolves SPEC §6.11) | done |
 | Adaptive Card templates | TODO |
 | Consent URL template | TODO |
-| `status.py` | TODO |
 | `activity_bridge.py` | TODO (blocked on §10 Q1 — Hermes IPC contract) |
 | `references/` content | TODO |
 | `SKILL.md` (drafted here, upstreamed later) | TODO |
@@ -145,6 +146,15 @@ uv run python scripts/secrets.py delete --tenant contoso.onmicrosoft.com --app-i
 ```
 
 > **macOS note.** First time the script writes to the keychain, macOS will pop a UI dialog asking permission for `python` to access your login keychain. Click "Always Allow" to avoid further prompts. Non-interactive contexts (CI, headless SSH, some IDEs) may fail with `rc=36 User interaction is not allowed` — unlock the keychain first with `security unlock-keychain` if needed.
+
+The status command works whether or not the `a365` CLI is installed (cloud components get marked `skipped` rather than failing):
+
+```bash
+uv run python scripts/status.py --human                    # markdown table
+uv run python scripts/status.py inbox-helper --human       # for a specific agent
+uv run python scripts/status.py                            # JSON to stdout
+echo $?                                                    # 0=ok, 1=partial, 2=broken, 3=uninitialized
+```
 
 ## License
 
