@@ -57,6 +57,7 @@ See [`SPEC.md` §10](SPEC.md). Highest-priority: the Hermes IPC contract that th
 - **2026-05-03:** repo created, `SPEC.md` v1 draft committed.
 - **2026-05-03:** `SPEC.md` revision 2 (glossary, diagrams, examples, troubleshooting, migration recipe, risks).
 - **2026-05-03:** first implementation slice — blueprint JSON and per-agent `.env` rendering with golden-file tests.
+- **2026-05-03:** second slice — `doctor.py` (read-only environment probe; resolves §10 Q7 — `atk` vs `a365` variant detection).
 
 ## Development
 
@@ -107,16 +108,25 @@ uv run python scripts/render_instance_env.py \
 |---|---|
 | Blueprint render (template + script + tests) | done |
 | Per-agent `.env` render (template + script + tests) | done |
-| `_common.py` shared Jinja env / path helpers | done |
+| `_common.py` shared helpers (Jinja env, `safe_run`, `tcp_reachable`, `parse_env`) | done |
+| `doctor.py` (env probe — resolves §10 Q7) | done |
 | Adaptive Card templates | TODO |
 | Consent URL template | TODO |
-| `secrets.py` (OS-keychain wrapper) | TODO |
-| `doctor.py` (env probe) | TODO |
+| `secrets.py` (OS-keychain wrapper — §10 Q3) | TODO |
 | `reconcile_app.py`, `reconcile_blueprint.py` | TODO |
 | `status.py` | TODO |
 | `activity_bridge.py` | TODO (blocked on §10 Q1 — Hermes IPC contract) |
 | `references/` content | TODO |
 | `SKILL.md` (drafted here, upstreamed later) | TODO |
+
+The doctor can be run directly:
+
+```bash
+uv run python scripts/doctor.py --human            # operator-friendly output
+uv run python scripts/doctor.py                    # JSON to stdout
+uv run python scripts/doctor.py --no-network       # offline diagnostic
+echo $?                                            # 0=ok, 1=warn, 2=error
+```
 
 ## License
 
