@@ -1,21 +1,22 @@
-"""hermes a365 instance create — register an A365 instance and write per-agent .env.
+"""hermes a365 instance create — write the per-agent runtime .env file.
 
-Spec: SPEC.md §6.5. Per-agent runtime config:
+v0.2 design: pure local config-file writer. No cloud step. The
+server-side agent identity is created by ``a365 setup blueprint``
+(driven by ``hermes a365 register``); this command only produces the
+``.env`` file that runtime consumers (the future activity bridge,
+telemetry pipeline, etc.) read for slug / owner / OTLP endpoint /
+business-hours metadata.
 
-- Inputs: ``agent-slug``, ``owner``, ``owner-aad-id``, optional business hours.
-- Inherits ``A365_APP_ID``, ``A365_TENANT_ID``, ``A365_CLI_VARIANT``, and
-  ``HERMES_OTLP_ENDPOINT`` from ``~/.hermes/.env`` (written by ``register``).
-- Idempotency: if ``~/.hermes/agents/<slug>/.env`` already records an
-  ``AA_INSTANCE_ID``, that UUID is preserved; otherwise a fresh one is
-  generated. Business-hours fields from a prior run are preserved unless
-  explicitly overridden on the command line.
-- Cloud step: ``a365 create-instance --blueprint=<slug> --instance=<UUID>``.
-  Skipped if the cloud already reports the instance (re-run noop).
-- Secrets policy: ``A365_APP_PASSWORD`` is *never* written to the agent .env
-  — runtime consumers (e.g. activity bridge) pull it from the OS keychain.
+Inherits required values (``A365_APP_ID``, ``A365_TENANT_ID``,
+``HERMES_OTLP_ENDPOINT``) from ``~/.hermes/.env``. An existing
+``AA_INSTANCE_ID`` in the agent .env is preserved across re-runs;
+business-hours fields from a prior run are also preserved unless
+explicitly overridden on the command line.
 
-Default mode is dry-run; ``--apply`` executes both the local .env write and
-the cloud registration call.
+Secrets policy unchanged from v0.1: this file never contains the T2
+client secret. Runtime consumers fetch it from the OS keychain.
+
+Default mode is dry-run; ``--apply`` performs the atomic write.
 """
 
 from __future__ import annotations
@@ -26,19 +27,14 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
 
 from _common import parse_env
-from register import AADSTSError, Mutator, get_mutator
 from render_instance_env import CLI_VARIANTS, InstanceEnvInputs, render_instance_env
-from status import QuerySource, get_query_source
 
 _HERMES_HOME_ENV = "HERMES_HOME"
 _HERMES_HOME_DEFAULT = "~/.hermes"
 
 _REQUIRED_PARENT_KEYS = ("A365_APP_ID", "A365_TENANT_ID")
-
-PlanAction = Literal["create", "noop", "create-cloud-only"]
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +43,7 @@ PlanAction = Literal["create", "noop", "create-cloud-only"]
 
 
 class InstanceCreateError(RuntimeError):
-    """Raised when instance create's apply path can't proceed."""
+    """Raised when instance create can't proceed (missing parent .env, bad inputs)."""
 
 
 # ---------------------------------------------------------------------------
@@ -101,10 +97,7 @@ def write_text_atomic(path: Path, text: str) -> None:
 
 @dataclass
 class InstanceCreateInputs:
-    """User-supplied arguments for instance create.
-
-    The slug doubles as the blueprint identifier (per SPEC §6.5 / §6.4).
-    """
+    """User-supplied arguments for the local-runtime .env writer."""
 
     slug: str
     owner: str
@@ -124,37 +117,32 @@ class InstanceCreateInputs:
 
 
 # ---------------------------------------------------------------------------
-# Planning
+# Plan
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class InstancePlan:
-    """Composite plan: local .env write + cloud registration."""
+    """The local file write the apply phase will perform."""
 
     slug: str
     aa_instance_id: str
     aa_instance_id_was_existing: bool
-    action: PlanAction
     desired_env_inputs: InstanceEnvInputs
-    cloud_actual: dict[str, Any] | None = None
+    env_path: Path
+    will_create: bool  # True if the agent .env doesn't yet exist
 
     def render_human(self) -> str:
-        lines = [
-            f"[plan] hermes a365 instance create {self.slug}",
-            f"  AA_INSTANCE_ID: {self.aa_instance_id}"
-            f"  ({'existing' if self.aa_instance_id_was_existing else 'new'})",
-            f"  agent .env:    {'will be written / merged'}",
-            f"  cloud step:    {self._cloud_phrase()}",
-        ]
-        return "\n".join(lines)
-
-    def _cloud_phrase(self) -> str:
-        if self.action == "noop":
-            return "instance already registered — no change"
-        if self.action == "create":
-            return f"would call a365 create-instance --blueprint={self.slug} --instance=<UUID>"
-        return "would only register cloud (local .env already complete)"
+        new_or_existing = "existing" if self.aa_instance_id_was_existing else "new"
+        action = "create" if self.will_create else "update"
+        return "\n".join(
+            [
+                f"[plan] hermes a365 instance create {self.slug}",
+                f"  AA_INSTANCE_ID: {self.aa_instance_id}  ({new_or_existing})",
+                f"  agent .env:    {self.env_path}  ({action})",
+                "  cloud step:    none — server-side identity is managed by `setup blueprint`",
+            ]
+        )
 
 
 def _resolve_otlp_endpoint(
@@ -173,11 +161,10 @@ def _resolve_otlp_endpoint(
 
 
 def _resolve_cli_variant(parent_env: dict[str, str]) -> str:
+    """v0.2 only ships the .NET variant; recorded for downstream drift-detection."""
     variant = parent_env.get("A365_CLI_VARIANT", "").strip()
     if variant in CLI_VARIANTS:
         return variant
-    # Sensible default — SPEC §6.2 lists both variants; pick .NET for parity
-    # with the GA Microsoft package feed. The doctor flags drift.
     return "a365-dotnet"
 
 
@@ -185,15 +172,14 @@ def build_instance_plan(
     inputs: InstanceCreateInputs,
     *,
     hermes_home: Path | None = None,
-    query_source: QuerySource | None = None,
 ) -> InstancePlan:
-    """Resolve identifiers, query cloud actual, return the composite plan."""
+    """Resolve identifiers, gather inherited values, return the file-write plan."""
     if hermes_home is None:
         hermes_home = _resolve_hermes_home()
-    qs = query_source or get_query_source()
 
     parent_env = _load_skill_env(hermes_home)
     existing_agent = _load_existing_agent_env(hermes_home, inputs.slug)
+    env_path = _agent_env_path(hermes_home, inputs.slug)
 
     existing_id = existing_agent.get("AA_INSTANCE_ID", "").strip()
     aa_instance_id = existing_id or str(uuid.uuid4())
@@ -208,36 +194,25 @@ def build_instance_plan(
         hermes_otlp_endpoint=_resolve_otlp_endpoint(inputs, parent_env),
         aa_instance_id=aa_instance_id,
         # Preserve prior business-hours values unless the caller overrode them.
-        business_hours_tz=inputs.business_hours_tz or existing_agent.get("BUSINESS_HOURS_TZ"),
+        business_hours_tz=(inputs.business_hours_tz or existing_agent.get("BUSINESS_HOURS_TZ")),
         business_hours_start=(
             inputs.business_hours_start or existing_agent.get("BUSINESS_HOURS_START")
         ),
-        business_hours_end=inputs.business_hours_end or existing_agent.get("BUSINESS_HOURS_END"),
+        business_hours_end=(inputs.business_hours_end or existing_agent.get("BUSINESS_HOURS_END")),
     )
-
-    cloud_actual: dict[str, Any] | None = None
-    if qs.available:
-        cloud_actual = qs.query_instance(instance_id=aa_instance_id)
-
-    if cloud_actual is not None:
-        action: PlanAction = "noop"
-    elif existing_id:
-        action = "create-cloud-only"
-    else:
-        action = "create"
 
     return InstancePlan(
         slug=inputs.slug,
         aa_instance_id=aa_instance_id,
         aa_instance_id_was_existing=bool(existing_id),
-        action=action,
         desired_env_inputs=desired_inputs,
-        cloud_actual=cloud_actual,
+        env_path=env_path,
+        will_create=not env_path.exists(),
     )
 
 
 # ---------------------------------------------------------------------------
-# Applying
+# Apply
 # ---------------------------------------------------------------------------
 
 
@@ -247,40 +222,19 @@ class InstanceCreateResult:
     aa_instance_id: str
     env_path: Path
     env_written: bool
-    cloud_registered: bool
     messages: list[str] = field(default_factory=list)
 
 
-def apply_instance_plan(
-    plan: InstancePlan,
-    *,
-    mutator: Mutator,
-    hermes_home: Path,
-) -> InstanceCreateResult:
-    """Write the agent .env atomically and (when needed) register the cloud instance."""
-    env_path = _agent_env_path(hermes_home, plan.slug)
+def apply_instance_plan(plan: InstancePlan) -> InstanceCreateResult:
+    """Render the desired .env and atomically write it to the agent dir."""
     rendered = render_instance_env(plan.desired_env_inputs)
-    write_text_atomic(env_path, rendered)
-
-    messages: list[str] = [f"[apply] wrote {env_path}"]
-    cloud_registered = False
-
-    if plan.action in ("create", "create-cloud-only"):
-        mutator.create_instance(blueprint_slug=plan.slug, instance_id=plan.aa_instance_id)
-        cloud_registered = True
-        messages.append(
-            f"[apply] a365 create-instance --blueprint={plan.slug} --instance={plan.aa_instance_id}"
-        )
-    else:
-        messages.append("[apply] cloud instance already registered — no change")
-
+    write_text_atomic(plan.env_path, rendered)
     return InstanceCreateResult(
         slug=plan.slug,
         aa_instance_id=plan.aa_instance_id,
-        env_path=env_path,
+        env_path=plan.env_path,
         env_written=True,
-        cloud_registered=cloud_registered,
-        messages=messages,
+        messages=[f"[apply] wrote {plan.env_path}"],
     )
 
 
@@ -291,11 +245,9 @@ def apply_instance_plan(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description=(
-            "hermes a365 instance create — write per-agent .env and register an A365 instance."
-        ),
+        description="hermes a365 instance create — write the per-agent runtime .env file.",
     )
-    parser.add_argument("slug", help="agent slug (also the blueprint id)")
+    parser.add_argument("slug", help="agent slug (also the agent-name passed to `a365 setup`)")
     parser.add_argument("--owner", required=True, help="owner email")
     parser.add_argument("--owner-aad-id", required=True, help="owner Entra (AAD) object id")
     parser.add_argument(
@@ -305,7 +257,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--business-hours-tz")
     parser.add_argument("--business-hours-start")
     parser.add_argument("--business-hours-end")
-    parser.add_argument("--apply", action="store_true", help="execute the plan; default is dry-run")
+    parser.add_argument(
+        "--apply", action="store_true", help="execute the file write; default is dry-run"
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -331,22 +285,10 @@ def main(argv: list[str] | None = None) -> int:
     sys.stdout.write(plan.render_human() + "\n")
 
     if not args.apply:
-        sys.stdout.write("\nNo mutations. Re-run with --apply to register.\n")
+        sys.stdout.write("\nNo mutations. Re-run with --apply to write the agent .env.\n")
         return 0
 
-    try:
-        result = apply_instance_plan(
-            plan,
-            mutator=get_mutator(),
-            hermes_home=_resolve_hermes_home(),
-        )
-    except AADSTSError as e:
-        print(f"ERROR {e.code}: {e.message}", file=sys.stderr)
-        return 2
-    except InstanceCreateError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 2
-
+    result = apply_instance_plan(plan)
     sys.stdout.write("\n" + "\n".join(result.messages) + "\ndone.\n")
     return 0
 
