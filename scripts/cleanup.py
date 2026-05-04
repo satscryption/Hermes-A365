@@ -1,36 +1,42 @@
-"""hermes a365 cleanup — destructive teardown of a single agent.
+"""hermes a365 cleanup — destructive teardown of an A365 agent.
 
-Spec: SPEC.md §6.13. Order matters per spec: ``deployment → instance →
-blueprint``. We deliberately stop short of the apps (T1/T2) because they
-are tenant-wide infrastructure shared across every agent in the skill —
-deleting them is a separate, more destructive operation that v0.1 does
-not provide.
+v0.2 design: drives the real ``a365 cleanup`` subcommands. The CLI ships
+three granular kinds plus a bare ``cleanup`` that does everything:
 
-Safety: ``--confirm`` is required and must be the literal agent slug. The
-plan output is always printed (regardless of ``--apply``) so the user can
-audit what would be removed.
+- ``a365 cleanup blueprint``  — Entra blueprint app + service principal
+- ``a365 cleanup instance``   — agent instance identity + user
+- ``a365 cleanup azure``      — Azure App Service + App Service Plan
 
-Local artefacts removed on success (apply only):
-- ``~/.hermes/agents/<slug>/.env``
-- ``~/.hermes/agents/<slug>/blueprint.json``
-- ``~/.hermes/agents/<slug>/`` directory (only if empty after the above)
+The v0.1 ``deployment`` and ``app`` kinds are gone (no per-tier app
+split, no separate deploy command in the GA CLI). Channel deployment in
+v0.2 is operator-side via the M365 Admin Centre — there's nothing
+cloud-side for us to "undeploy" except the Azure infrastructure.
+
+Order of operations (safe → unsafe): ``azure`` → ``instance`` →
+``blueprint``. We tear the App Service down first so the agent's
+runtime stops, then revoke the agent's Entra identity, then remove the
+blueprint. After all cloud steps succeed, local artefacts under
+``~/.hermes/agents/<slug>/`` are removed.
+
+Safety: ``--confirm`` is required and must equal the agent name. The
+plan is always printed (even without ``--apply``) so the operator can
+audit before mutating. Each CLI invocation is run with ``--yes`` to
+skip the CLI's own confirmation prompt — our gate is ``--confirm``.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
-from _common import parse_env
-from register import AADSTSError, Mutator, get_mutator
-from status import QuerySource, get_query_source
+from mutator import AADSTSError, CliInvocationError, Mutator, get_mutator
 
-CleanupKind = Literal["deployment", "instance", "blueprint"]
+CleanupKind = Literal["azure", "instance", "blueprint"]
+CLEANUP_KINDS: tuple[CleanupKind, ...] = ("azure", "instance", "blueprint")
 
 _HERMES_HOME_ENV = "HERMES_HOME"
 _HERMES_HOME_DEFAULT = "~/.hermes"
@@ -42,11 +48,11 @@ _HERMES_HOME_DEFAULT = "~/.hermes"
 
 
 class CleanupError(RuntimeError):
-    """Raised when cleanup can't proceed (missing confirm, agent not found)."""
+    """Raised when cleanup can't proceed (missing confirm, bad kind)."""
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Path helpers
 # ---------------------------------------------------------------------------
 
 
@@ -59,30 +65,35 @@ def _agent_dir(hermes_home: Path, slug: str) -> Path:
     return hermes_home / "agents" / slug
 
 
-def _agent_env_path(hermes_home: Path, slug: str) -> Path:
-    return _agent_dir(hermes_home, slug) / ".env"
+def _local_artefacts(hermes_home: Path, slug: str) -> list[Path]:
+    """Return existing local files we'd remove after cloud cleanup succeeds."""
+    candidates = [
+        _agent_dir(hermes_home, slug) / ".env",
+        # Legacy v0.1 caches that may linger on a fresh checkout.
+        _agent_dir(hermes_home, slug) / "blueprint.json",
+        _agent_dir(hermes_home, slug) / "bridge.pid",
+        _agent_dir(hermes_home, slug) / "bridge.log",
+    ]
+    return [p for p in candidates if p.exists()]
 
 
-def _blueprint_cache_path(hermes_home: Path, slug: str) -> Path:
-    return _agent_dir(hermes_home, slug) / "blueprint.json"
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
 
 
-def _resolve_aa_instance_id(hermes_home: Path, slug: str) -> str | None:
-    """Pull AA_INSTANCE_ID from the agent .env, or None if unrecorded."""
-    env_path = _agent_env_path(hermes_home, slug)
-    if not env_path.exists():
-        return None
-    return parse_env(env_path.read_text()).get("AA_INSTANCE_ID", "").strip() or None
+@dataclass
+class CleanupInputs:
+    agent_name: str
+    tenant_id: str | None = None
+    kinds: tuple[CleanupKind, ...] = CLEANUP_KINDS  # default: all three
 
-
-def _instance_has_channels(payload: dict[str, Any] | None) -> bool:
-    """True if the instance currently has any channels bound (state ``ok``)."""
-    if not payload:
-        return False
-    channels = payload.get("channels") or {}
-    if not isinstance(channels, dict):
-        return False
-    return any(state == "ok" for state in channels.values())
+    def __post_init__(self) -> None:
+        if not self.agent_name:
+            raise ValueError("agent_name must be non-empty")
+        for k in self.kinds:
+            if k not in CLEANUP_KINDS:
+                raise ValueError(f"unknown cleanup kind: {k!r}; allowed: {list(CLEANUP_KINDS)}")
 
 
 # ---------------------------------------------------------------------------
@@ -92,35 +103,31 @@ def _instance_has_channels(payload: dict[str, Any] | None) -> bool:
 
 @dataclass
 class CleanupStep:
-    """One ordered step the cleanup will (try to) execute."""
-
     kind: CleanupKind
-    identifier: str
-    detail: str
-    skip_reason: str | None = None  # set when the step is a noop
+    argv: list[str]
+    description: str
 
 
 @dataclass
 class CleanupPlan:
-    slug: str
-    aa_instance_id: str | None
+    inputs: CleanupInputs
     steps: list[CleanupStep]
     local_paths: list[Path] = field(default_factory=list)
 
     def render_human(self) -> str:
-        lines = [f"[plan] hermes a365 cleanup {self.slug}"]
-        if self.aa_instance_id:
-            lines.append(f"  AA_INSTANCE_ID: {self.aa_instance_id}")
+        lines = [f"[plan] hermes a365 cleanup {self.inputs.agent_name}"]
+        if self.inputs.tenant_id:
+            lines.append(f"  tenant: {self.inputs.tenant_id}")
         else:
-            lines.append("  AA_INSTANCE_ID: (none recorded)")
+            lines.append("  tenant: (auto-detect from `az account show`)")
         lines.append("  cloud steps (in order):")
         if not self.steps:
-            lines.append("    (none — no cloud state to remove)")
+            lines.append("    (none)")
         else:
             for s in self.steps:
-                marker = "skip" if s.skip_reason else "would run"
-                lines.append(f"    - {s.kind:<10}  {marker}: {s.detail}")
-        lines.append("  local files to remove:")
+                lines.append(f"    - {s.kind:<10} {s.description}")
+                lines.append(f"      $ {' '.join(s.argv)}")
+        lines.append("  local files to remove (after cloud cleanup succeeds):")
         if not self.local_paths:
             lines.append("    (none)")
         else:
@@ -129,78 +136,50 @@ class CleanupPlan:
         return "\n".join(lines)
 
 
+_DESCRIPTIONS: dict[CleanupKind, str] = {
+    "azure": "remove Azure App Service + App Service Plan",
+    "instance": "remove agent instance identity + user from Entra ID",
+    "blueprint": "remove Entra blueprint app + service principal",
+}
+
+
+def _step_argv(kind: CleanupKind, inputs: CleanupInputs) -> list[str]:
+    argv = ["a365", "cleanup", kind, "--agent-name", inputs.agent_name, "--yes"]
+    if inputs.tenant_id:
+        argv.extend(["--tenant-id", inputs.tenant_id])
+    return argv
+
+
 def build_cleanup_plan(
-    slug: str,
+    inputs: CleanupInputs,
     *,
     hermes_home: Path | None = None,
-    query_source: QuerySource | None = None,
 ) -> CleanupPlan:
-    """Compose the cleanup plan from local + cloud state.
+    """Compose the ordered list of CLI cleanup steps + local artefact list.
 
-    The plan is built defensively: each step is included only when the
-    underlying state appears to exist, and steps for missing state get a
-    ``skip_reason``. ``apply_cleanup_plan`` honours those skips.
+    Order is canonical (azure → instance → blueprint) regardless of the
+    order in ``inputs.kinds`` — we always tear down the runtime infra
+    before revoking the identity.
     """
     if hermes_home is None:
         hermes_home = _resolve_hermes_home()
-    qs = query_source or get_query_source()
 
-    aa_instance_id = _resolve_aa_instance_id(hermes_home, slug)
+    requested = set(inputs.kinds) or set(CLEANUP_KINDS)
     steps: list[CleanupStep] = []
-
-    # 1. Deployment — only if there's an instance id and any channels are bound.
-    if aa_instance_id:
-        instance_payload = qs.query_instance(instance_id=aa_instance_id) if qs.available else None
-        if _instance_has_channels(instance_payload):
+    for kind in CLEANUP_KINDS:  # canonical order
+        if kind in requested:
             steps.append(
                 CleanupStep(
-                    kind="deployment",
-                    identifier=aa_instance_id,
-                    detail=f"unbind all channels for instance {aa_instance_id[:8]}…",
+                    kind=kind,
+                    argv=_step_argv(kind, inputs),
+                    description=_DESCRIPTIONS[kind],
                 )
             )
-        else:
-            steps.append(
-                CleanupStep(
-                    kind="deployment",
-                    identifier=aa_instance_id,
-                    detail=f"channels for {aa_instance_id[:8]}…",
-                    skip_reason="no channels bound",
-                )
-            )
-    # 2. Instance — only if there's an instance id (cloud presence not strictly required).
-    if aa_instance_id:
-        steps.append(
-            CleanupStep(
-                kind="instance",
-                identifier=aa_instance_id,
-                detail=f"delete instance {aa_instance_id[:8]}…",
-            )
-        )
-
-    # 3. Blueprint — keyed by slug; cloud presence not strictly required.
-    steps.append(
-        CleanupStep(
-            kind="blueprint",
-            identifier=slug,
-            detail=f"delete blueprint {slug!r}",
-        )
-    )
-
-    # Local files we'll remove if they exist.
-    local_paths: list[Path] = []
-    for p in (
-        _agent_env_path(hermes_home, slug),
-        _blueprint_cache_path(hermes_home, slug),
-    ):
-        if p.exists():
-            local_paths.append(p)
 
     return CleanupPlan(
-        slug=slug,
-        aa_instance_id=aa_instance_id,
+        inputs=inputs,
         steps=steps,
-        local_paths=local_paths,
+        local_paths=_local_artefacts(hermes_home, inputs.agent_name),
     )
 
 
@@ -211,9 +190,8 @@ def build_cleanup_plan(
 
 @dataclass
 class CleanupResult:
-    slug: str
-    cloud_steps_run: list[str] = field(default_factory=list)
-    cloud_steps_skipped: list[str] = field(default_factory=list)
+    plan: CleanupPlan
+    completed: list[CleanupKind] = field(default_factory=list)
     local_paths_removed: list[Path] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
 
@@ -224,24 +202,18 @@ def apply_cleanup_plan(
     mutator: Mutator,
     hermes_home: Path,
 ) -> CleanupResult:
-    """Execute the plan: cloud steps in order, then local file removal."""
-    result = CleanupResult(slug=plan.slug)
+    """Run each cloud step in order; on success, remove local artefacts.
+
+    Any AADSTS / CliInvocationError aborts the run — local files stay on
+    disk so a re-run can pick up where we left off.
+    """
+    result = CleanupResult(plan=plan)
 
     for step in plan.steps:
-        label = f"{step.kind} {step.identifier}"
-        if step.skip_reason:
-            result.cloud_steps_skipped.append(label)
-            result.messages.append(f"[apply] skip {step.kind}: {step.skip_reason}")
-            continue
-        if step.kind == "deployment":
-            # Unbind by setting the channel set to empty.
-            mutator.deploy(instance_id=step.identifier, channels=[])
-        else:
-            mutator.cleanup(kind=step.kind, identifier=step.identifier)
-        result.cloud_steps_run.append(label)
-        result.messages.append(f"[apply] {step.kind}: {step.detail}")
+        mutator.run(step.argv)
+        result.completed.append(step.kind)
+        result.messages.append(f"[apply] {step.kind}: {step.description} — done")
 
-    # Local artefact removal.
     for path in plan.local_paths:
         try:
             path.unlink()
@@ -250,8 +222,8 @@ def apply_cleanup_plan(
         result.local_paths_removed.append(path)
         result.messages.append(f"[apply] removed {path}")
 
-    # Best-effort agent dir cleanup (only if empty after file removal).
-    agent_dir = _agent_dir(hermes_home, plan.slug)
+    # Best-effort agent dir reaper.
+    agent_dir = _agent_dir(hermes_home, plan.inputs.agent_name)
     if agent_dir.exists() and not any(agent_dir.iterdir()):
         agent_dir.rmdir()
         result.messages.append(f"[apply] removed empty dir {agent_dir}")
@@ -264,67 +236,71 @@ def apply_cleanup_plan(
 # ---------------------------------------------------------------------------
 
 
-def _validate_confirm(slug: str, confirm: str | None) -> None:
+def _validate_confirm(agent_name: str, confirm: str | None) -> None:
     if confirm is None:
         raise CleanupError(
-            f"--confirm is required and must be the agent slug literal (e.g. --confirm={slug})"
+            f"--confirm is required for --apply and must be the agent name literal "
+            f"(e.g. --confirm={agent_name})"
         )
-    if confirm != slug:
+    if confirm != agent_name:
         raise CleanupError(
-            f"--confirm value {confirm!r} does not match slug {slug!r}; refusing to proceed"
+            f"--confirm value {confirm!r} does not match agent-name {agent_name!r}; "
+            "refusing to proceed"
         )
+
+
+def _parse_kinds(value: str | None) -> tuple[CleanupKind, ...]:
+    """Parse ``--kinds=azure,instance`` into a validated tuple."""
+    if not value:
+        return CLEANUP_KINDS
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    for p in parts:
+        if p not in CLEANUP_KINDS:
+            raise CleanupError(f"unknown cleanup kind: {p!r}; allowed: {list(CLEANUP_KINDS)}")
+    return tuple(parts)  # type: ignore[return-value]
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="hermes a365 cleanup — destructive per-agent teardown.",
+        description="hermes a365 cleanup — destructive teardown of an A365 agent.",
     )
-    parser.add_argument("slug", help="agent slug to tear down")
+    parser.add_argument("--agent-name", required=True, help="agent base name")
+    parser.add_argument(
+        "--tenant-id",
+        help="tenant id; default auto-detects via `az account show`",
+    )
+    parser.add_argument(
+        "--kinds",
+        help=(
+            "comma-separated subset of "
+            f"{list(CLEANUP_KINDS)}; default = all (azure → instance → blueprint)"
+        ),
+    )
     parser.add_argument(
         "--confirm",
-        help="must equal the agent slug for the apply path to proceed",
+        help="must equal --agent-name for the apply path to proceed",
     )
     parser.add_argument("--apply", action="store_true", help="execute the plan; default is dry-run")
-    parser.add_argument(
-        "--json", action="store_true", help="emit the plan as JSON instead of human-readable text"
-    )
     args = parser.parse_args(argv)
 
-    plan = build_cleanup_plan(args.slug)
+    try:
+        kinds = _parse_kinds(args.kinds)
+        inputs = CleanupInputs(agent_name=args.agent_name, tenant_id=args.tenant_id, kinds=kinds)
+    except (ValueError, CleanupError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
 
-    if args.json:
-        sys.stdout.write(
-            json.dumps(
-                {
-                    "slug": plan.slug,
-                    "aa_instance_id": plan.aa_instance_id,
-                    "steps": [
-                        {
-                            "kind": s.kind,
-                            "identifier": s.identifier,
-                            "detail": s.detail,
-                            "skip_reason": s.skip_reason,
-                        }
-                        for s in plan.steps
-                    ],
-                    "local_paths": [str(p) for p in plan.local_paths],
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
-        )
-    else:
-        sys.stdout.write(plan.render_human() + "\n")
+    plan = build_cleanup_plan(inputs)
+    sys.stdout.write(plan.render_human() + "\n")
 
     if not args.apply:
         sys.stdout.write(
-            f"\nNo mutations. Re-run with --apply --confirm={args.slug} to tear down.\n"
+            f"\nNo mutations. Re-run with --apply --confirm={args.agent_name} to tear down.\n"
         )
         return 0
 
     try:
-        _validate_confirm(args.slug, args.confirm)
+        _validate_confirm(args.agent_name, args.confirm)
     except CleanupError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
@@ -333,6 +309,9 @@ def main(argv: list[str] | None = None) -> int:
         result = apply_cleanup_plan(plan, mutator=get_mutator(), hermes_home=_resolve_hermes_home())
     except AADSTSError as e:
         print(f"ERROR {e.code}: {e.message}", file=sys.stderr)
+        return 2
+    except CliInvocationError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         return 2
 
     sys.stdout.write("\n" + "\n".join(result.messages) + "\ndone.\n")

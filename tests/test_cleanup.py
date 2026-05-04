@@ -1,92 +1,42 @@
-"""Tests for scripts/cleanup.py."""
+"""Tests for scripts/cleanup.py — v0.2 around the real CLI cleanup subs."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import pytest
 from cleanup import (
+    CLEANUP_KINDS,
     CleanupError,
+    CleanupInputs,
     CleanupResult,
+    _parse_kinds,
     _validate_confirm,
     apply_cleanup_plan,
     build_cleanup_plan,
 )
-from register import AADSTSError
+from mutator import AADSTSError, CliInvocationError, RunResult
 
 # ---------------------------------------------------------------------------
-# Fakes
+# FakeMutator (records argv lists)
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class FakeQuerySource:
-    available: bool = True
-    instances: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-    def query_license(self) -> dict[str, Any] | None:
-        return None
-
-    def query_app_by_id(self, *, app_id: str) -> dict[str, Any] | None:
-        return None
-
-    def query_app_by_name(self, *, name: str) -> dict[str, Any] | None:
-        return None
-
-    def query_consent(self, *, app_id: str) -> dict[str, Any] | None:
-        return None
-
-    def query_blueprint(self, *, slug: str) -> dict[str, Any] | None:
-        return None
-
-    def query_instance(self, *, instance_id: str) -> dict[str, Any] | None:
-        return self.instances.get(instance_id)
-
-    def query_telemetry(self, *, instance_id: str) -> dict[str, Any] | None:
-        return None
-
-    def query_fic(self, *, app_id: str) -> dict[str, Any] | None:
-        return None
 
 
 @dataclass
 class FakeMutator:
     available: bool = True
-    cleanup_error: Exception | None = None
-    deploy_error: Exception | None = None
-    calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    calls: list[list[str]] = field(default_factory=list)
+    scripted: list[RunResult | Exception] = field(default_factory=list)
 
-    def setup_app(self, *, tier: int, name: str) -> dict[str, Any]:  # pragma: no cover
-        raise NotImplementedError
-
-    def fic_configure(self, *, app_id: str) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def fic_rotate(self, *, app_id: str) -> dict[str, Any]:  # pragma: no cover
-        raise NotImplementedError
-
-    def setup_blueprint(self, *, file_path: Path) -> dict[str, Any]:  # pragma: no cover
-        raise NotImplementedError
-
-    def create_instance(  # pragma: no cover
-        self, *, blueprint_slug: str, instance_id: str
-    ) -> dict[str, Any]:
-        raise NotImplementedError
-
-    def deploy(self, *, instance_id: str, channels: list[str]) -> dict[str, Any]:
-        self.calls.append(("deploy", {"instance_id": instance_id, "channels": list(channels)}))
-        if self.deploy_error is not None:
-            err, self.deploy_error = self.deploy_error, None
-            raise err
-        return {"channels": {}}
-
-    def cleanup(self, *, kind: str, identifier: str) -> None:
-        self.calls.append(("cleanup", {"kind": kind, "identifier": identifier}))
-        if self.cleanup_error is not None:
-            err, self.cleanup_error = self.cleanup_error, None
-            raise err
+    def run(self, argv: list[str], *, timeout: float = 60.0) -> RunResult:
+        self.calls.append(list(argv))
+        if self.scripted:
+            nxt = self.scripted.pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
+        return RunResult(argv=list(argv), returncode=0, stdout="", stderr="")
 
 
 # ---------------------------------------------------------------------------
@@ -94,26 +44,61 @@ class FakeMutator:
 # ---------------------------------------------------------------------------
 
 
-_INSTANCE_ID = "550e8400-e29b-41d4-a716-446655440000"
-
-
-def _seed_agent(
+def _seed_agent_dir(
     tmp_path: Path,
     *,
-    slug: str = "inbox-helper",
-    instance_id: str | None = _INSTANCE_ID,
-    blueprint_cache: bool = True,
-) -> None:
-    agent_dir = tmp_path / "agents" / slug
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    if instance_id is not None:
-        (agent_dir / ".env").write_text(f"AA_INSTANCE_ID={instance_id}\n")
-    if blueprint_cache:
-        (agent_dir / "blueprint.json").write_text('{"agentIdentity":{"slug":"x"}}\n')
+    agent_name: str = "inbox-helper",
+    with_env: bool = True,
+    with_blueprint_cache: bool = False,
+) -> Path:
+    agent_dir = tmp_path / "agents" / agent_name
+    agent_dir.mkdir(parents=True)
+    if with_env:
+        (agent_dir / ".env").write_text("AA_INSTANCE_ID=550e8400\n")
+    if with_blueprint_cache:
+        (agent_dir / "blueprint.json").write_text("{}")
+    return agent_dir
 
 
 # ---------------------------------------------------------------------------
-# --confirm validation
+# CleanupInputs validation
+# ---------------------------------------------------------------------------
+
+
+class TestCleanupInputs:
+    def test_minimal_valid(self) -> None:
+        inp = CleanupInputs(agent_name="x")
+        assert inp.kinds == CLEANUP_KINDS
+
+    def test_empty_agent_name_rejected(self) -> None:
+        with pytest.raises(ValueError, match="agent_name"):
+            CleanupInputs(agent_name="")
+
+    def test_unknown_kind_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unknown cleanup kind"):
+            CleanupInputs(agent_name="x", kinds=("bogus",))  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# _parse_kinds
+# ---------------------------------------------------------------------------
+
+
+class TestParseKinds:
+    def test_empty_means_all(self) -> None:
+        assert _parse_kinds(None) == CLEANUP_KINDS
+        assert _parse_kinds("") == CLEANUP_KINDS
+
+    def test_subset(self) -> None:
+        assert _parse_kinds("azure,instance") == ("azure", "instance")
+
+    def test_unknown_kind_rejected(self) -> None:
+        with pytest.raises(CleanupError, match="unknown cleanup kind"):
+            _parse_kinds("azure,bogus")
+
+
+# ---------------------------------------------------------------------------
+# _validate_confirm
 # ---------------------------------------------------------------------------
 
 
@@ -131,151 +116,155 @@ class TestConfirm:
 
 
 # ---------------------------------------------------------------------------
-# Plan
+# build_cleanup_plan
 # ---------------------------------------------------------------------------
 
 
 class TestBuildCleanupPlan:
-    def test_full_plan_for_deployed_agent(self, tmp_path: Path) -> None:
-        _seed_agent(tmp_path)
-        qs = FakeQuerySource(instances={_INSTANCE_ID: {"channels": {"teams": "ok"}}})
-        plan = build_cleanup_plan("inbox-helper", hermes_home=tmp_path, query_source=qs)
+    def test_default_plans_all_three_in_canonical_order(self, tmp_path: Path) -> None:
+        plan = build_cleanup_plan(CleanupInputs(agent_name="x"), hermes_home=tmp_path)
         kinds = [s.kind for s in plan.steps]
-        # Order matters per spec.
-        assert kinds == ["deployment", "instance", "blueprint"]
-        # No skip on deployment because channels are bound.
-        assert plan.steps[0].skip_reason is None
-        # Local paths picked up.
-        assert any(p.name == ".env" for p in plan.local_paths)
-        assert any(p.name == "blueprint.json" for p in plan.local_paths)
+        assert kinds == ["azure", "instance", "blueprint"]
 
-    def test_deployment_skipped_when_no_channels_bound(self, tmp_path: Path) -> None:
-        _seed_agent(tmp_path)
-        qs = FakeQuerySource(instances={_INSTANCE_ID: {"channels": {}}})
-        plan = build_cleanup_plan("inbox-helper", hermes_home=tmp_path, query_source=qs)
-        deployment = next(s for s in plan.steps if s.kind == "deployment")
-        assert deployment.skip_reason == "no channels bound"
-
-    def test_no_instance_id_skips_deployment_and_instance_steps(self, tmp_path: Path) -> None:
-        # Agent dir exists but no .env (and so no AA_INSTANCE_ID).
-        agent_dir = tmp_path / "agents" / "inbox-helper"
-        agent_dir.mkdir(parents=True)
-        (agent_dir / "blueprint.json").write_text("{}")
+    def test_subset_preserves_canonical_order(self, tmp_path: Path) -> None:
+        # Even when caller orders the kinds differently, we emit canonical.
         plan = build_cleanup_plan(
-            "inbox-helper", hermes_home=tmp_path, query_source=FakeQuerySource()
-        )
-        kinds = [s.kind for s in plan.steps]
-        assert kinds == ["blueprint"]
-        # blueprint.json shows up; .env does not.
-        assert any(p.name == "blueprint.json" for p in plan.local_paths)
-        assert all(p.name != ".env" for p in plan.local_paths)
-
-    def test_unavailable_query_source_treats_no_channels(self, tmp_path: Path) -> None:
-        _seed_agent(tmp_path)
-        plan = build_cleanup_plan(
-            "inbox-helper",
+            CleanupInputs(agent_name="x", kinds=("blueprint", "azure")),
             hermes_home=tmp_path,
-            query_source=FakeQuerySource(available=False),
         )
-        deployment = next(s for s in plan.steps if s.kind == "deployment")
-        assert deployment.skip_reason == "no channels bound"
+        kinds = [s.kind for s in plan.steps]
+        assert kinds == ["azure", "blueprint"]
 
-    def test_no_local_files_when_agent_dir_missing(self, tmp_path: Path) -> None:
-        plan = build_cleanup_plan("ghost", hermes_home=tmp_path, query_source=FakeQuerySource())
-        assert plan.aa_instance_id is None
+    def test_argv_shape_minimal(self, tmp_path: Path) -> None:
+        plan = build_cleanup_plan(CleanupInputs(agent_name="x"), hermes_home=tmp_path)
+        assert plan.steps[0].argv == [
+            "a365",
+            "cleanup",
+            "azure",
+            "--agent-name",
+            "x",
+            "--yes",
+        ]
+
+    def test_argv_shape_with_tenant(self, tmp_path: Path) -> None:
+        plan = build_cleanup_plan(
+            CleanupInputs(agent_name="x", tenant_id="contoso.onmicrosoft.com"),
+            hermes_home=tmp_path,
+        )
+        assert plan.steps[0].argv == [
+            "a365",
+            "cleanup",
+            "azure",
+            "--agent-name",
+            "x",
+            "--yes",
+            "--tenant-id",
+            "contoso.onmicrosoft.com",
+        ]
+
+    def test_local_paths_picked_up(self, tmp_path: Path) -> None:
+        _seed_agent_dir(tmp_path, with_env=True, with_blueprint_cache=True)
+        plan = build_cleanup_plan(CleanupInputs(agent_name="inbox-helper"), hermes_home=tmp_path)
+        names = sorted(p.name for p in plan.local_paths)
+        assert ".env" in names
+        assert "blueprint.json" in names  # legacy v0.1 cache picked up too
+
+    def test_no_local_paths_when_agent_dir_missing(self, tmp_path: Path) -> None:
+        plan = build_cleanup_plan(CleanupInputs(agent_name="ghost"), hermes_home=tmp_path)
         assert plan.local_paths == []
 
 
+# ---------------------------------------------------------------------------
+# Plan rendering
+# ---------------------------------------------------------------------------
+
+
 class TestPlanRender:
-    def test_human_lists_steps_and_local_paths(self, tmp_path: Path) -> None:
-        _seed_agent(tmp_path)
-        qs = FakeQuerySource(instances={_INSTANCE_ID: {"channels": {"teams": "ok"}}})
-        plan = build_cleanup_plan("inbox-helper", hermes_home=tmp_path, query_source=qs)
+    def test_human_lists_steps_and_argv_and_local_paths(self, tmp_path: Path) -> None:
+        _seed_agent_dir(tmp_path)
+        plan = build_cleanup_plan(CleanupInputs(agent_name="inbox-helper"), hermes_home=tmp_path)
         text = plan.render_human()
         assert "[plan] hermes a365 cleanup inbox-helper" in text
-        assert "deployment" in text
+        assert "azure" in text
+        assert "instance" in text
         assert "blueprint" in text
-        assert "would run" in text
-        assert "blueprint.json" in text
+        assert "$ a365 cleanup azure" in text
+        assert ".env" in text
+
+    def test_human_says_none_when_no_local_files(self, tmp_path: Path) -> None:
+        plan = build_cleanup_plan(CleanupInputs(agent_name="ghost"), hermes_home=tmp_path)
+        assert "(none)" in plan.render_human()
 
 
 # ---------------------------------------------------------------------------
-# Apply
+# apply_cleanup_plan
 # ---------------------------------------------------------------------------
 
 
 class TestApplyCleanup:
-    def test_full_apply_runs_steps_in_order_and_removes_local(self, tmp_path: Path) -> None:
-        _seed_agent(tmp_path)
-        qs = FakeQuerySource(instances={_INSTANCE_ID: {"channels": {"teams": "ok"}}})
-        plan = build_cleanup_plan("inbox-helper", hermes_home=tmp_path, query_source=qs)
-
+    def test_runs_three_cloud_steps_then_removes_local(self, tmp_path: Path) -> None:
+        _seed_agent_dir(tmp_path)
+        plan = build_cleanup_plan(CleanupInputs(agent_name="inbox-helper"), hermes_home=tmp_path)
         mutator = FakeMutator()
         result = apply_cleanup_plan(plan, mutator=mutator, hermes_home=tmp_path)
 
         assert isinstance(result, CleanupResult)
-        # Mutator call order: deploy(empty), cleanup instance, cleanup blueprint.
-        assert [c[0] for c in mutator.calls] == ["deploy", "cleanup", "cleanup"]
-        assert mutator.calls[0][1] == {"instance_id": _INSTANCE_ID, "channels": []}
-        assert mutator.calls[1][1] == {"kind": "instance", "identifier": _INSTANCE_ID}
-        assert mutator.calls[2][1] == {"kind": "blueprint", "identifier": "inbox-helper"}
-        # Local files removed.
+        assert result.completed == ["azure", "instance", "blueprint"]
+        # Mutator received argv lists matching plan order.
+        assert [argv[2] for argv in mutator.calls] == ["azure", "instance", "blueprint"]
+        # Local .env was removed; agent dir reaped.
         assert not (tmp_path / "agents" / "inbox-helper" / ".env").exists()
-        assert not (tmp_path / "agents" / "inbox-helper" / "blueprint.json").exists()
-        # Empty agent dir removed too.
         assert not (tmp_path / "agents" / "inbox-helper").exists()
 
-    def test_skipped_deployment_does_not_call_deploy(self, tmp_path: Path) -> None:
-        _seed_agent(tmp_path)
-        qs = FakeQuerySource(instances={_INSTANCE_ID: {"channels": {}}})
-        plan = build_cleanup_plan("inbox-helper", hermes_home=tmp_path, query_source=qs)
+    def test_subset_only_runs_selected_kinds(self, tmp_path: Path) -> None:
+        _seed_agent_dir(tmp_path)
+        plan = build_cleanup_plan(
+            CleanupInputs(agent_name="inbox-helper", kinds=("blueprint",)),
+            hermes_home=tmp_path,
+        )
         mutator = FakeMutator()
-        apply_cleanup_plan(plan, mutator=mutator, hermes_home=tmp_path)
-        # deploy is NOT called; instance and blueprint cleanup are.
-        ops = [c[0] for c in mutator.calls]
-        assert "deploy" not in ops
-        assert ops == ["cleanup", "cleanup"]
+        result = apply_cleanup_plan(plan, mutator=mutator, hermes_home=tmp_path)
+        assert result.completed == ["blueprint"]
+        assert [argv[2] for argv in mutator.calls] == ["blueprint"]
 
-    def test_apps_are_never_touched(self, tmp_path: Path) -> None:
-        _seed_agent(tmp_path)
-        qs = FakeQuerySource(instances={_INSTANCE_ID: {"channels": {"teams": "ok"}}})
-        plan = build_cleanup_plan("inbox-helper", hermes_home=tmp_path, query_source=qs)
-        mutator = FakeMutator()
-        apply_cleanup_plan(plan, mutator=mutator, hermes_home=tmp_path)
-        # No `app` cleanup ever appears among the recorded calls.
-        for op, kwargs in mutator.calls:
-            if op == "cleanup":
-                assert kwargs["kind"] != "app"
-
-    def test_aadsts_error_propagates(self, tmp_path: Path) -> None:
-        _seed_agent(tmp_path)
-        qs = FakeQuerySource(instances={_INSTANCE_ID: {"channels": {"teams": "ok"}}})
-        plan = build_cleanup_plan("inbox-helper", hermes_home=tmp_path, query_source=qs)
-        mutator = FakeMutator(deploy_error=AADSTSError("AADSTS65001", "no perms"))
+    def test_aadsts_error_propagates_and_local_files_remain(self, tmp_path: Path) -> None:
+        _seed_agent_dir(tmp_path)
+        plan = build_cleanup_plan(CleanupInputs(agent_name="inbox-helper"), hermes_home=tmp_path)
+        mutator = FakeMutator(scripted=[AADSTSError("AADSTS65001", "no perms")])
         with pytest.raises(AADSTSError) as excinfo:
             apply_cleanup_plan(plan, mutator=mutator, hermes_home=tmp_path)
         assert excinfo.value.code == "AADSTS65001"
-        # Local files must remain when the cloud step failed.
+        # Local .env stays — re-run can pick up.
         assert (tmp_path / "agents" / "inbox-helper" / ".env").exists()
 
-    def test_no_local_files_means_no_local_removal(self, tmp_path: Path) -> None:
-        plan = build_cleanup_plan("ghost", hermes_home=tmp_path, query_source=FakeQuerySource())
-        mutator = FakeMutator()
-        result = apply_cleanup_plan(plan, mutator=mutator, hermes_home=tmp_path)
-        assert result.local_paths_removed == []
+    def test_cli_invocation_error_propagates(self, tmp_path: Path) -> None:
+        _seed_agent_dir(tmp_path)
+        plan = build_cleanup_plan(CleanupInputs(agent_name="inbox-helper"), hermes_home=tmp_path)
+        mutator = FakeMutator(scripted=[CliInvocationError(["a365"], 7, "boom")])
+        with pytest.raises(CliInvocationError):
+            apply_cleanup_plan(plan, mutator=mutator, hermes_home=tmp_path)
 
-    def test_idempotent_rerun_after_full_cleanup(self, tmp_path: Path) -> None:
-        _seed_agent(tmp_path)
-        qs = FakeQuerySource(instances={_INSTANCE_ID: {"channels": {"teams": "ok"}}})
-        plan = build_cleanup_plan("inbox-helper", hermes_home=tmp_path, query_source=qs)
+    def test_idempotent_re_run_after_full_cleanup(self, tmp_path: Path) -> None:
+        _seed_agent_dir(tmp_path)
+        plan = build_cleanup_plan(CleanupInputs(agent_name="inbox-helper"), hermes_home=tmp_path)
         apply_cleanup_plan(plan, mutator=FakeMutator(), hermes_home=tmp_path)
 
-        # Second run — agent dir is gone; plan is now blueprint-only with no local files.
-        plan2 = build_cleanup_plan(
-            "inbox-helper",
-            hermes_home=tmp_path,
-            query_source=FakeQuerySource(),
-        )
-        assert plan2.aa_instance_id is None
-        assert [s.kind for s in plan2.steps] == ["blueprint"]
+        # Second run: agent dir is gone, plan still has all three cloud steps
+        # (we don't probe to check), but local_paths is empty.
+        plan2 = build_cleanup_plan(CleanupInputs(agent_name="inbox-helper"), hermes_home=tmp_path)
         assert plan2.local_paths == []
+
+    def test_no_local_files_means_no_local_removal(self, tmp_path: Path) -> None:
+        plan = build_cleanup_plan(CleanupInputs(agent_name="ghost"), hermes_home=tmp_path)
+        result = apply_cleanup_plan(plan, mutator=FakeMutator(), hermes_home=tmp_path)
+        assert result.local_paths_removed == []
+
+
+# ---------------------------------------------------------------------------
+# Sanity
+# ---------------------------------------------------------------------------
+
+
+def test_kinds_constant_pinned() -> None:
+    # Real CLI has exactly these three subs (verified 2026-05-04 v1.1.171).
+    assert CLEANUP_KINDS == ("azure", "instance", "blueprint")
