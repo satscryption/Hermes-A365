@@ -154,7 +154,7 @@ because `a365 query-entra --telemetry` does not exist), and `SKILL.md`
 | `references/` content (CLI surface, error codes, etc.) | done |
 | `SKILL.md` 0.2.0 final (rewritten against the GA CLI surface) | **done (Slice 18g)** |
 | `activity_bridge.py` | TODO (blocked on SPEC §10 Q1 — Hermes IPC contract) |
-| Live integration test against an M365 tenant | TODO (operator-side; needs Frontier-Preview tenant + `pwsh` + `Agent 365 CLI` client app) |
+| Live integration test against an M365 tenant | runbook in [`references/live-tenant-test.md`](references/live-tenant-test.md); operator-side execution still pending |
 
 The doctor can be run directly:
 
