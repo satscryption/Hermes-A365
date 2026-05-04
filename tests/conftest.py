@@ -1,6 +1,6 @@
 """Pytest configuration and shared fixtures.
 
-Adds ``scripts/`` to ``sys.path`` so tests can ``from render_blueprint import ...``
+Adds ``scripts/`` to ``sys.path`` so tests can ``from render_instance_env import ...``
 without packaging tricks. Also wires up ``--update-golden`` for regenerating
 golden fixtures.
 """

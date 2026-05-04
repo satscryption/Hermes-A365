@@ -1,0 +1,164 @@
+"""Tests for scripts/mutator.py — the v0.2 thin CLI wrapper."""
+
+from __future__ import annotations
+
+import subprocess
+from unittest.mock import patch
+
+import pytest
+from mutator import (
+    A365_CLI_BINARY,
+    AADSTS_CONSENT_REQUIRED,
+    AADSTS_LICENSE_NOT_PROPAGATED,
+    A365CliMutator,
+    AADSTSError,
+    CliInvocationError,
+    Mutator,
+    RunResult,
+    get_mutator,
+)
+
+# ---------------------------------------------------------------------------
+# RunResult shape
+# ---------------------------------------------------------------------------
+
+
+class TestRunResult:
+    def test_combined_strips_and_concatenates(self) -> None:
+        r = RunResult(argv=["a365"], returncode=0, stdout="hello\n", stderr="warn\n")
+        assert r.combined == "hello\nwarn"
+
+    def test_combined_blank_returns_empty(self) -> None:
+        r = RunResult(argv=["a365"], returncode=0, stdout="   ", stderr="")
+        assert r.combined == ""
+
+
+# ---------------------------------------------------------------------------
+# AADSTSError catalogue
+# ---------------------------------------------------------------------------
+
+
+class TestAADSTSError:
+    def test_carries_code_and_message(self) -> None:
+        e = AADSTSError("AADSTS500011", "license not propagated")
+        assert e.code == "AADSTS500011"
+        assert "license not propagated" in str(e)
+
+    def test_well_known_codes_exposed(self) -> None:
+        # Apply paths import these constants directly; pin them.
+        assert AADSTS_LICENSE_NOT_PROPAGATED == "AADSTS500011"
+        assert AADSTS_CONSENT_REQUIRED == "AADSTS90094"
+
+
+# ---------------------------------------------------------------------------
+# A365CliMutator.run — happy path
+# ---------------------------------------------------------------------------
+
+
+def _completed(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(
+        args=["a365"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+class TestA365CliMutatorRun:
+    def test_success_returns_run_result(self) -> None:
+        m = A365CliMutator()
+        m.available = True  # bypass PATH check
+        with patch("mutator.subprocess.run", return_value=_completed(0, "ok\n", "")):
+            result = m.run(["a365", "setup", "blueprint", "--agent-name", "x"])
+        assert isinstance(result, RunResult)
+        assert result.returncode == 0
+        assert result.stdout == "ok\n"
+        assert result.argv == ["a365", "setup", "blueprint", "--agent-name", "x"]
+
+    def test_unavailable_raises_cli_error(self) -> None:
+        m = A365CliMutator()
+        m.available = False
+        with pytest.raises(CliInvocationError, match="not on PATH"):
+            m.run(["a365", "--help"])
+
+
+# ---------------------------------------------------------------------------
+# Error path: AADSTS extraction
+# ---------------------------------------------------------------------------
+
+
+class TestAADSTSExtraction:
+    def test_aadsts_code_in_stderr_raises_aadsts_error(self) -> None:
+        m = A365CliMutator()
+        m.available = True
+        bad = "ERROR AADSTS500011: tenant license has not propagated yet"
+        with (
+            patch("mutator.subprocess.run", return_value=_completed(2, "", bad)),
+            pytest.raises(AADSTSError) as excinfo,
+        ):
+            m.run(["a365", "setup", "blueprint"])
+        assert excinfo.value.code == "AADSTS500011"
+
+    def test_aadsts_in_stdout_also_caught(self) -> None:
+        m = A365CliMutator()
+        m.available = True
+        bad = "Some chatter\nAADSTS90094: admin consent required"
+        with (
+            patch("mutator.subprocess.run", return_value=_completed(1, bad, "")),
+            pytest.raises(AADSTSError) as excinfo,
+        ):
+            m.run(["a365", "setup", "permissions", "bot"])
+        assert excinfo.value.code == "AADSTS90094"
+
+    def test_non_aadsts_failure_raises_cli_invocation_error(self) -> None:
+        m = A365CliMutator()
+        m.available = True
+        with (
+            patch("mutator.subprocess.run", return_value=_completed(7, "", "weird crash")),
+            pytest.raises(CliInvocationError) as excinfo,
+        ):
+            m.run(["a365", "setup", "blueprint"])
+        assert excinfo.value.returncode == 7
+        assert "weird crash" in excinfo.value.output
+
+
+# ---------------------------------------------------------------------------
+# Mutator protocol
+# ---------------------------------------------------------------------------
+
+
+class _FakeMutator:
+    """Minimal protocol-compatible fake — used by every v0.2 apply test."""
+
+    def __init__(self) -> None:
+        self.available = True
+        self.calls: list[list[str]] = []
+        self.scripted: list[RunResult | Exception] = []
+
+    def run(self, argv: list[str], *, timeout: float = 60.0) -> RunResult:
+        self.calls.append(list(argv))
+        if self.scripted:
+            nxt = self.scripted.pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
+        return RunResult(argv=list(argv), returncode=0, stdout="", stderr="")
+
+
+class TestMutatorProtocol:
+    def test_fake_satisfies_protocol_statically(self) -> None:
+        # If this binds, _FakeMutator structurally matches the Mutator protocol.
+        m: Mutator = _FakeMutator()
+        # Round-trip a call.
+        result = m.run(["a365", "--help"])
+        assert isinstance(result, RunResult)
+
+
+# ---------------------------------------------------------------------------
+# get_mutator default
+# ---------------------------------------------------------------------------
+
+
+class TestGetMutator:
+    def test_returns_a365cli_mutator(self) -> None:
+        assert isinstance(get_mutator(), A365CliMutator)
+
+    def test_a365_cli_binary_constant_pinned(self) -> None:
+        assert A365_CLI_BINARY == "a365"

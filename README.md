@@ -123,29 +123,36 @@ uv run python scripts/render_instance_env.py \
 
 ### What's implemented vs TODO
 
+**v0.2 redesign in progress.** v0.1 targeted a speculative CLI that
+diverged materially from Microsoft.Agents.A365.DevTools.Cli's GA surface
+(see [`references/a365-cli-reference.md`](references/a365-cli-reference.md)).
+Slice 18a — the foundation reset — has landed: new `mutator.py` (thin
+`run(argv)` wrapper around the real CLI), `a365_config.py` (read/write
+`a365.config.json`), and the obsolete v0.1 scripts that targeted
+non-existent verbs have been deleted. Subsequent slices rebuild the
+apply path on top.
+
 | Area | Status |
 |---|---|
-| Blueprint render (template + script + tests) | done |
-| Per-agent `.env` render (template + script + tests) | done |
-| `_common.py` shared helpers (Jinja env, `safe_run`, `tcp_reachable`, `parse_env`) | done |
-| `doctor.py` (env probe — resolves §10 Q7) | done |
+| `_common.py` shared helpers (Jinja env, `safe_run`, `tcp_reachable`, `parse_env`, `deep_diff`) | done |
 | `secrets.py` (OS-keychain wrapper — resolves §10 Q3) | done |
-| `reconcile_app.py`, `reconcile_blueprint.py` (idempotent diff/plan) | done |
-| `status.py` (per-component report; resolves SPEC §6.11) | done |
+| `reconcile_app.py`, `reconcile_blueprint.py` (idempotent diff/plan abstraction) | done |
 | Adaptive Card templates + `emit_card.py` (greeting / confirmation / error) | done |
-| Consent URL template + `consent.py` (URL render + grant poll; §6.3) | done |
 | `license.py` (recommendation engine; §6.1) | done |
-| `register.py` (Entra T1+T2 app + user-FIC; §6.2) | done |
-| `blueprint_create.py` (register/patch agent blueprint; §6.4) | done |
-| `instance_create.py` (per-agent .env + cloud instance; §6.5) | done |
-| `deploy.py` (channel set reconciliation; §6.9) | done |
-| `workiq.py` (toggle Work IQ MCP exposure; §6.6) | done |
-| `telemetry.py` (OTLP / span verifier; §6.8) | done |
-| `fic_rotate.py` (rotate user-FIC + refresh keychain; §6.10) | done |
-| `cleanup.py` (per-agent destructive teardown; §6.13) | done |
-| `references/` content | done |
-| `SKILL.md` (drafted here, upstreamed later) | done |
-| `activity_bridge.py` | TODO (blocked on §10 Q1 — Hermes IPC contract) |
+| Consent URL template + `consent.py` (URL render + grant poll; §6.3) | done |
+| `render_instance_env.py` + template (per-agent runtime `.env`) | done |
+| `mutator.py` (v0.2 thin CLI wrapper + AADSTS handling) | **done (Slice 18a)** |
+| `a365_config.py` (`a365.config.json` round-trip) | **done (Slice 18a)** |
+| `doctor.py` (env probe) | done — needs Slice 18f rework for real CLI variant + PowerShell + custom-client-app prereqs |
+| `status.py` (per-component report; resolves SPEC §6.11) | done — needs Slice 18f rework around real `query-entra` surface |
+| `register.py` → setup orchestrator (`a365 setup blueprint` + `setup permissions {mcp,bot}`) | **TODO (Slice 18b)** |
+| `instance_create.py` → local runtime `.env` writer only | **TODO (Slice 18c)** |
+| `cleanup.py` rewrite around `cleanup blueprint/instance/azure` | **TODO (Slice 18d)** |
+| `publish.py` (manifest packaging via `a365 publish`) | **TODO (Slice 18e)** |
+| `references/` content (CLI surface, error codes, etc.) | done |
+| `SKILL.md` 0.2.0 final | **TODO (Slice 18g)** |
+| `activity_bridge.py` | TODO (blocked on SPEC §10 Q1 — Hermes IPC contract) |
+| Live integration test against an M365 tenant | TODO (Slice 18g — once apply path is rebuilt) |
 
 The doctor can be run directly:
 
@@ -204,66 +211,13 @@ uv run python scripts/consent.py --no-open               # render + poll, no bro
 uv run python scripts/consent.py --timeout 60            # custom poll timeout (seconds)
 ```
 
-Entra app registration (default dry-run; `--apply` to mutate):
-
-```bash
-# Plan only — prints what would change, no mutations
-uv run python scripts/register.py \
-    --app-name "Hermes Inbox Agent" \
-    --tenant-id contoso.onmicrosoft.com
-
-# Execute the plan
-uv run python scripts/register.py \
-    --app-name "Hermes Inbox Agent" \
-    --tenant-id contoso.onmicrosoft.com \
-    --cli-variant a365-dotnet \
-    --apply
-```
-
-Blueprint registration (default dry-run; `--apply` to register/patch):
-
-```bash
-# Plan only — renders to a tmp file, prints diff vs cloud actual
-uv run python scripts/blueprint_create.py inbox-helper \
-    --description "Summarises unread mail" \
-    --purpose productivity \
-    --workiq mail,calendar
-
-# Execute the plan
-uv run python scripts/blueprint_create.py inbox-helper \
-    --description "Summarises unread mail" \
-    --purpose productivity \
-    --workiq mail,calendar \
-    --apply
-```
-
-Instance create (per-agent `.env` + cloud registration; idempotent):
-
-```bash
-# Plan only — shows what AA_INSTANCE_ID will be (existing or new)
-uv run python scripts/instance_create.py inbox-helper \
-    --owner sadiq@contoso.com \
-    --owner-aad-id 00000000-0000-0000-0000-000000000001
-
-# Execute the plan
-uv run python scripts/instance_create.py inbox-helper \
-    --owner sadiq@contoso.com \
-    --owner-aad-id 00000000-0000-0000-0000-000000000001 \
-    --apply
-```
-
-Channel deployment (idempotent set reconciliation):
-
-```bash
-# Plan only — shows additions / removals vs current cloud state
-uv run python scripts/deploy.py inbox-helper --channels=teams,outlook
-
-# Execute the plan
-uv run python scripts/deploy.py inbox-helper --channels=teams,outlook --apply
-
-# Unbind everything
-uv run python scripts/deploy.py inbox-helper --channels="" --apply
-```
+> **v0.2 in progress.** The apply-path scripts (`register.py`,
+> `instance_create.py`, `cleanup.py`, plus the new `publish.py`) are
+> being rebuilt against the real `a365` CLI surface. v0.1 commands that
+> targeted non-existent CLI verbs (`deploy.py`, `fic_rotate.py`,
+> `blueprint_create.py`, `workiq.py`, `render_blueprint.py`) have been
+> deleted. Usage examples for the rebuilt commands will return as each
+> sub-slice lands.
 
 Work IQ MCP exposure (drives blueprint reconciliation):
 

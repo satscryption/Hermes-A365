@@ -1,7 +1,7 @@
 ---
 name: hermes-a365
 description: Use when registering, deploying, or operating a Hermes-driven agent under Microsoft Agent 365 governance — covers Entra app registration, agent blueprints, MCP-mediated M365 data access, Bot Framework activity bridging, OpenTelemetry, and Teams/Outlook channel deployment.
-version: 0.1.0
+version: 0.2.0-alpha
 author: Hermes Agent
 license: MIT
 metadata:
