@@ -4,7 +4,11 @@ Integrate Hermes agents into the Microsoft 365 ecosystem using Microsoft Agent 3
 
 ## Status
 
-**Feature-complete except activity bridge.** The authoritative design lives in [`SPEC.md`](SPEC.md) (v1, 2026-05-03 — two days after A365 reached general availability on 2026-05-01). All planned subcommands ship except `activity-bridge`, which is blocked on the §10 Q1 Hermes IPC contract. The validator-compliant [`SKILL.md`](SKILL.md) is drafted here and ready for upstream contribution into the Hermes harness per SPEC §3.1. Test suite: 393 passing, ruff-clean.
+**Design-stage v0.1 — apply-side needs rebuild for v0.2.** The authoritative design lives in [`SPEC.md`](SPEC.md) (v1, 2026-05-03 — two days after A365 reached general availability on 2026-05-01). All planner-side scripts ship and unit tests pass (393, ruff-clean). The validator-compliant [`SKILL.md`](SKILL.md) is drafted and harness-loadable.
+
+**However**, on 2026-05-04 we installed the real `Microsoft.Agents.A365.DevTools.Cli` and discovered that the spec's command surface (drafted from public docs that pre-dated GA) does not match the GA reality. Verified divergences are catalogued in [`references/a365-cli-reference.md`](references/a365-cli-reference.md) — most notably: there's no `setup app --tier=N`, no `fic configure/rotate`, no `create-instance`, no `deploy --channels=…`, no per-kind `cleanup app/deployment`, and the `query-entra` flag set is much smaller than assumed. The operator must also pre-register a custom Entra client app *before* the CLI works (reverse of what `register.py` does today).
+
+The planner architecture — reconcilers, status report, doctor, secrets, render helpers, local artefact handling — survives the redesign. The `Mutator` protocol and most of the apply-path scripts (`register.py`, `blueprint_create.py`, `instance_create.py`, `deploy.py`, `fic_rotate.py`, `cleanup.py`) need to be re-implemented around the real command set as v0.2 work. Activity-bridge work remains blocked on SPEC §10 Q1 (Hermes IPC contract).
 
 ## Repo layout
 

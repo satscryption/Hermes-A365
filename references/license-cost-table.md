@@ -1,6 +1,6 @@
 # A365 license decision matrix
 
-Snapshot date: 2026-05-04
+Snapshot date: 2026-05-04 (verified against live tenant)
 
 Pricing source: Microsoft public list prices as of GA (2026-05-01).
 Update this file when Microsoft publishes new pricing tiers; the
@@ -9,10 +9,10 @@ recommendation without ever purchasing.
 
 ## SKUs
 
-| SKU | List price | Bundles | Notes |
-|---|---|---|---|
-| Agent 365 add-on | $15 / user / month | A365 governance + identity | Add-on to any M365 plan; no Copilot, no Defender, no Purview. |
-| Microsoft 365 E7 | $99 / user / month | M365 + A365 + Copilot + Defender + Purview | Full enterprise bundle; cheapest path when adopting Copilot anyway. |
+| Marketing name | `subscribedSkus` partNumber | List price | Bundles | Notes |
+|---|---|---|---|---|
+| Agent 365 add-on | `MICROSOFT_AGENT_365_TIER_3` (verified) | $15 / user / month | A365 governance + identity | Add-on to any M365 plan; no Copilot, no Defender, no Purview. The Graph `subscribedSkus` API exposes this as `MICROSOFT_AGENT_365_TIER_3`; tier numbering may differ in other regions. |
+| Microsoft 365 E7 | (TBD — not seen in test tenant) | $99 / user / month | M365 + A365 + Copilot + Defender + Purview | Full enterprise bundle; cheapest path when adopting Copilot anyway. |
 
 ## Decision rule (encoded in `scripts/license.py`)
 

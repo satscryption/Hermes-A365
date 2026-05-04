@@ -1,78 +1,192 @@
 # A365 CLI reference
 
-Snapshot date: 2026-05-04
+Snapshot date: 2026-05-04 (verified against installed CLI)
 
-## CLI variants
+The CLI is **`Microsoft.Agents.A365.DevTools.Cli`** (binary name `a365`),
+distributed as a .NET tool from NuGet:
 
-The skill drives the **GA** Microsoft Agent 365 CLI. Two variants ship the
-same command surface and both expose the binary as `a365` on PATH; the
-doctor disambiguates them (SPEC §10 Q7).
+```
+dotnet tool install -g Microsoft.Agents.A365.DevTools.Cli --prerelease
+```
 
-| Variant | Source | Min version | Last tested | Detection signal |
-|---|---|---|---|---|
-| `a365` (.NET) | Microsoft package feed | **1.0.0** (GA, 2026-05-01) | 1.0.0 | `a365 --version` returns `Microsoft Agent 365 CLI <ver>` |
-| `atk` (npm) | `@microsoft/agent-365-cli` on npmjs.org | **1.0.0** (GA) | 1.0.0 | `a365 --version` returns `@microsoft/agent-365-cli@<ver>` |
-| `az` CLI | Microsoft package feed | **2.55.0** | 2.62.0 | Used for Entra reads only (not A365 itself) |
+- Source: <https://github.com/microsoft/Agent365-devTools>
+- NuGet: <https://www.nuget.org/packages/Microsoft.Agents.A365.DevTools.Cli>
+- Docs: <https://learn.microsoft.com/en-us/microsoft-agent-365/developer/agent-365-cli>
 
-**Pin policy.** The doctor fails-soft on a higher version (warns, lets you
-proceed) and fails-hard on a lower version. When upgrading the pin,
-re-run the integration tests (§11.2) on both variants before bumping.
+Verified version: **1.1.171** (commit `11c378141d`).
 
-## Subcommands consumed by this skill
+There is **no npm variant**. What lives on npm under the
+`@microsoft/agents-a365-*` namespace is the **runtime SDK**, not a CLI:
+`@microsoft/agents-a365-runtime`, `-tooling`, `-notifications`, plus
+framework extensions for OpenAI / LangChain / Claude. The .NET CLI is the
+single CLI-shaped surface Microsoft publishes.
 
-Read-only (used by `status.py` / `doctor.py` / planners):
+---
 
-| Subcommand | Purpose | Module |
+## ⚠️ Spec drift discovered 2026-05-04
+
+The original SPEC.md in this repo (drafted 2026-05-03 from public
+documentation that pre-dated the GA release) assumed a CLI command surface
+that **does not match the GA reality**. Major divergences:
+
+| What SPEC.md / scripts/ assumed | What the CLI actually exposes |
+|---|---|
+| Two CLI variants: `a365` (.NET) + `atk` (npm) | One CLI: `a365` (.NET only). No npm equivalent. |
+| `setup app --tier=1`, `setup app --tier=2` | No tier split. `setup blueprint` creates a single Entra app for the blueprint; the agent **identity** is auto-created server-side. |
+| `setup blueprint --file=<JSON>` | `setup blueprint` reads from `a365.config.json` / `ToolingManifest.json` (or `--agent-name` for config-less mode), **not** an arbitrary JSON file. |
+| `fic configure --app=<id>` | No `fic` subcommand. FIC is configured implicitly during `setup permissions {mcp,bot}`. |
+| `fic rotate --app=<id>` | No CLI command for rotation. Likely SDK-only or admin-portal-only. |
+| `create-instance --blueprint=<slug> --instance=<id>` | No such command. Instance lifecycle is part of `setup all` / `publish`. |
+| `deploy --instance=<id> --channels=teams,outlook,m365copilot` | No standalone `deploy` command at the top level. Channel deployment is **out of CLI scope** — the operator runs `publish` to produce a package and uploads it to the M365 Admin Center manually. The `--m365` flag at `setup blueprint` time registers the messaging endpoint via MCP Platform. |
+| `cleanup deployment --instance=<id>`, `cleanup app --app=<id>` | No `deployment` or `app` cleanup kinds. Real subs: `cleanup blueprint`, `cleanup instance`, `cleanup azure`. Bare `cleanup` removes ALL agent resources (blueprint + instance + Azure) in one shot. |
+| `query-entra --by-name`, `--by-app-id`, `--license`, `--telemetry`, `--instance-channel`, `--scopes`, `--fic`, `--blueprint`, `--instance`, `--consent-status` | None of these flags exist. The full `query-entra` surface is two subcommands: `blueprint-scopes` and `instance-scopes`. |
+| Operator runs the skill, the skill registers the Entra apps for them | **Reverse:** operator must pre-register a custom Entra client app named "Agent 365 CLI" (with delegated Graph permissions and admin consent) **before** the CLI works. The CLI then runs *as* that app. See [Custom Client App Registration](https://learn.microsoft.com/microsoft-agent-365/developer/custom-client-app-registration). |
+
+Implication: the `Mutator` protocol in `scripts/register.py` and most of
+the planner/applier scripts (`register.py`, `blueprint_create.py`,
+`instance_create.py`, `deploy.py`, `fic_rotate.py`, `cleanup.py`) target
+subcommands that don't exist. A v0.2 redesign is required to drive the
+real CLI; see SPEC.md `## 14.1 Risks` row "Hermes harness API drift" for
+the change-management posture, and the new redesign-tracking issue
+(filed separately).
+
+---
+
+## Real top-level commands (verified 2026-05-04, v1.1.171)
+
+| Command | Purpose |
+|---|---|
+| `setup` | Bootstrap (granular per-step or `setup all`). |
+| `publish` | Update manifest IDs, package the manifest for upload to the M365 Admin Center. |
+| `query-entra` | Read scopes / consent status for blueprint or instance. |
+| `cleanup` | Tear down blueprint / instance / Azure resources. |
+| `develop` | Manage MCP tool servers in the local agent dev workflow. |
+| `develop-mcp` | Manage MCP servers in Dataverse environments. |
+
+There is **no** standalone `deploy`, `register`, `create-instance`, or
+`fic` command at the top level despite README mentions in some Microsoft
+docs.
+
+## `setup` subcommands
+
+| Subcommand | Purpose | Min permissions |
 |---|---|---|
-| `a365 query-entra --license` | Tenant license posture | `status.py` |
-| `a365 query-entra --by-name <name>` | T1/T2 app lookup by display name | `register.py` |
-| `a365 query-entra --by-app-id <id>` | App lookup by id | `status.py` |
-| `a365 query-entra --consent-status --app=<id>` | Consent grant state | `consent.py`, `status.py` |
-| `a365 query-entra --blueprint=<slug>` | Blueprint payload | `blueprint_create.py`, `status.py` |
-| `a365 query-entra --instance=<id>` | Instance + channel state | `instance_create.py`, `deploy.py`, `status.py` |
-| `a365 query-entra --telemetry --instance=<id>` | OTLP / span surface | `telemetry.py`, `status.py` |
-| `a365 query-entra --fic --app=<id>` | FIC expiry / status | `status.py` |
-| `a365 query-entra --scopes` | Live A365 delegated scope catalog | `doctor.py` (drift check) |
+| `setup requirements` | Validate prerequisites (PowerShell 7+, Frontier Preview enrollment, custom client app, Azure context). Read-only. | Sign-in only. |
+| `setup blueprint` | Create the agent blueprint — Entra app registration tied to the blueprint identity. | Agent ID Developer role. |
+| `setup permissions mcp` | Configure MCP server OAuth2 grants + inheritable permissions. | Global Administrator. |
+| `setup permissions bot` | Configure Messaging Bot API OAuth2 grants. | Global Administrator. |
+| `setup permissions custom` | Configure custom resource OAuth2 grants. | Global Administrator. |
+| `setup permissions copilotstudio` | Configure Power Platform CopilotStudio.Copilots.Invoke. | Global Administrator. |
+| `setup all` | Run blueprint + permissions + endpoint in one shot. | Global Administrator (covers all sub-steps). |
 
-Mutating (used through `Mutator` protocol in `scripts/register.py`):
+Common flags across `setup *`:
 
-| Subcommand | Mutator op | Module |
-|---|---|---|
-| `a365 setup app --tier=<n> --name=<name>` | `setup_app` | `register.py` |
-| `a365 fic configure --app=<id>` | `fic_configure` | `register.py` |
-| `a365 fic rotate --app=<id>` | `fic_rotate` | `fic_rotate.py` |
-| `a365 setup blueprint --file=<path>` | `setup_blueprint` | `blueprint_create.py` |
-| `a365 create-instance --blueprint=<slug> --instance=<id>` | `create_instance` | `instance_create.py` |
-| `a365 deploy --instance=<id> --channels=<list>` | `deploy` | `deploy.py` |
-| `a365 cleanup deployment --instance=<id>` | `cleanup` (`kind="deployment"`) | `cleanup.py` |
-| `a365 cleanup instance --instance=<id>` | `cleanup` (`kind="instance"`) | `cleanup.py` |
-| `a365 cleanup blueprint --slug=<slug>` | `cleanup` (`kind="blueprint"`) | `cleanup.py` |
-| `a365 cleanup app --app=<id>` | `cleanup` (`kind="app"`) | (not yet wired; reserved for full-skill teardown) |
+- `-n / --agent-name <name>` — base name; derives `<name> Identity`,
+  `<name> Blueprint`. Auto-detects tenant from `az account show`.
+- `--tenant-id <tenant>` — override auto-detection.
+- `--dry-run` — show what would happen without executing.
+- `-v / --verbose` — verbose logging.
+- `--m365` — treat the agent as an M365 agent (registers messaging
+  endpoint via MCP Platform). Default off.
+- `--skip-requirements` — skip prerequisites validation (use with care).
 
-## JSON output convention
+`setup all` also accepts `--aiteammate` (AI Teammate vs blueprint-only)
+and `--authmode <obo|s2s|both>` (auth pattern for the agent identity).
 
-Every mutating call uses `--output=json` so we can parse a structured
-response. The skill's `_extract_json_object` helper pulls the last
-balanced `{ … }` from mixed log/JSON output; both CLI variants prefix
-status lines to stdout, so don't `json.loads` the whole output.
+## `query-entra` subcommands
 
-## Auth posture
+| Subcommand | Purpose |
+|---|---|
+| `query-entra blueprint-scopes` | List configured scopes + consent status for the agent blueprint. |
+| `query-entra instance-scopes` | List configured scopes + consent status for the agent instance. |
 
-The CLI authenticates the operator (delegated user). It does **not** use
-the T2 confidential-client secret directly — that secret backs the agent
-runtime (activity bridge), not the CLI. Operator login is handled by
-`a365 login` (or the underlying `az login` for tenant reads); this skill
-does not attempt to drive login automatically.
+Common flags: `-n / --agent-name`, `--tenant-id`, `-v / --verbose`.
 
-## Drift handling
+## `cleanup` subcommands
 
-If a subcommand the skill calls is renamed or its flag set changes
-(e.g. `--name=` → `--display-name=`):
+| Subcommand | Purpose |
+|---|---|
+| `cleanup` (bare) | Remove ALL: blueprint, instance, Azure resources. |
+| `cleanup blueprint` | Remove Entra ID blueprint application + service principal. |
+| `cleanup instance` | Remove agent instance identity + user from Entra ID. |
+| `cleanup azure` | Remove Azure resources (App Service, App Service Plan). |
 
-1. The mutator's `_run` will return a non-zero exit code with stderr
-   surfacing the unknown-flag error.
-2. Update this file's "Subcommands consumed" row with the new flag.
-3. Update the corresponding `A365CliMutator` method in `scripts/register.py`.
-4. Bump the snapshot date.
+Common flags: `-n / --agent-name`, `--tenant-id`, `--dry-run`,
+`-v / --verbose`, `-y / --yes` (skip confirmation).
 
-Treat any change to CLI behaviour as a release-gating event per SPEC §14.1.
+`cleanup blueprint` extras: `--endpoint-only` (drop messaging endpoint
+only), `--m365` (clear endpoint from Teams Graph via MCP Platform —
+only meaningful with `--endpoint-only`).
+
+## `publish`
+
+Updates manifest IDs and produces a package zip the operator uploads to
+the M365 Admin Center. Flags: `-n / --agent-name`, `--tenant-id`,
+`--dry-run`, `--aiteammate`, `--use-blueprint` (blueprint-based non-DW
+flow), `-v / --verbose`.
+
+## `develop` subcommands (MCP tool servers, local dev)
+
+`list-available`, `list-configured`, `add-mcp-servers <list>`,
+`remove-mcp-servers <list>`, `get-token`, `add-permissions`,
+`mts` / `start-mock-tooling-server`.
+
+## `develop-mcp` subcommands (Dataverse-hosted MCP)
+
+`list-environments`, `list-servers`, `publish`, `unpublish`, `approve`,
+`block`, `package-mcp-server`, `register-external-mcp-server`.
+
+---
+
+## Hard prerequisites the CLI checks for (verified via `setup requirements`)
+
+1. **PowerShell 7+ on PATH** as `pwsh`. The CLI shells out for several
+   operations. (macOS users: `brew install --cask powershell`.)
+2. **Tenant enrolled in the Microsoft Frontier Preview Program.** The
+   CLI cannot verify automatically and only warns; setup will fail at
+   later steps if not enrolled. Enrollment URL:
+   <https://adoption.microsoft.com/copilot/frontier-program/>
+3. **Custom Entra client app** named `Agent 365 CLI` (or whatever the
+   operator names it) with delegated Microsoft Graph permissions and
+   admin-consent granted. The CLI runs *as* this app via interactive
+   delegated auth (browser or device-code on platforms without WAM).
+4. **`az login`** with an account that has at least Agent ID Developer
+   role; Global Administrator is needed for the `setup permissions *`
+   steps and for `setup all`.
+5. **Azure subscription** with Contributor role for infrastructure
+   provisioning steps in `setup all`.
+
+## Auth model
+
+Interactive delegated auth via MSAL. On macOS (verified on macOS 26.4.1
+during this snapshot), browser-based WAM auth is **not supported** —
+the CLI falls back to device-code flow and prints a code + URL the
+operator enters at <https://login.microsoft.com/device>.
+
+Token cache: persistent MSAL cache at
+`~/Library/Application Support/Microsoft.Agents.A365.DevTools.Cli/`.
+On macOS the persistent cache via Keychain currently fails to register
+("Failed to register persistent token cache"); the CLI warns that
+"authentication prompts may be repeated."
+
+## Config
+
+The CLI prefers an `a365.config.json` next to the operator's working
+directory (and `ToolingManifest.json` for MCP server bindings). When
+omitted, `--agent-name` is the universal handle; tenant is detected via
+`az account show`.
+
+## What this skill currently doesn't drive
+
+Given the divergence above, the v0.1 skill scripts in this repo do not
+yet map to the real CLI. The Mutator protocol needs to be redesigned
+around the actual command set. Until that lands, treat the skill as a
+**design artefact + planner architecture** that needs the apply-side
+re-implemented; the unit tests, reconcilers, status report, doctor,
+and local artefact handling all survive the redesign.
+
+Live SKU naming spotted in the user's tenant during the same probe:
+`MICROSOFT_AGENT_365_TIER_3` — the SKU part number, distinct from the
+"Agent 365 add-on" / "M365 E7" labels we recorded in
+[`license-cost-table.md`](license-cost-table.md). That file should be
+updated to use the real SKU part numbers.
