@@ -226,8 +226,12 @@ External issues filed:
 
 Open issues in this repo (run `gh issue list` for current state):
 
-- **[#1](../../issues/1)** — Tier 3 responder (Hermes-native). Blocked
-  on Hermes#20133 + SPEC §10 Q1.
+- **[#1](../../issues/1)** — Hermes gateway platform plugin
+  (`agent365`). The activity bridge becomes a `BasePlatformAdapter`,
+  registered via `~/.hermes/plugins/agent365/PLUGIN.yaml`. SPEC §10
+  Q1 resolved 2026-05-05 by inspecting the bundled harness — Hermes
+  ships a documented platform-plugin contract (`gateway/platforms/ADDING_A_PLATFORM.md`),
+  so the plugin path is unblocked even before Hermes#20133 lands.
 - **[#3](../../issues/3)** — Activity bridge streaming responses.
   Required for M365 Copilot substantive replies.
 - **[#4](../../issues/4)** — Proactive long-running reply pattern (>10s
