@@ -13,8 +13,21 @@ test fakes trivial (record argv, return scripted output).
 See ``references/a365-cli-reference.md`` for the verified command
 surface (CLI v1.1.171, .NET only — no npm variant).
 
+The 2026-05-05 live walkthrough surfaced that ``a365 setup`` verbs
+emit interactive device-code prompts on first run for write-scope MSAL
+bootstrap. The original implementation captured stdout in a single
+buffer (``subprocess.run(capture_output=True)``), which hid those
+prompts until the subprocess completed — operators couldn't see the
+code to enter it, the wrapper hung indefinitely, and the timeout
+killed the partially-completed CLI run. Slice 18j replaces that with
+:func:`_run_streaming`: line-buffered output that flows to the
+operator's stdout in real time while still being captured for AADSTS
+detection. Stderr is merged into stdout (subprocess ``stderr=STDOUT``)
+so chronological order is preserved across the merged stream;
+``RunResult.stderr`` is consequently always empty in production.
+
 AADSTS handling lives here too: the CLI surfaces Microsoft auth errors
-embedded in its stdout/stderr, so every :meth:`run` call screens for
+embedded in its stdout, so every :meth:`run` call screens for
 ``AADSTS<code>`` tokens and raises :class:`AADSTSError` on a non-zero
 exit when one is found.
 """
@@ -23,8 +36,11 @@ from __future__ import annotations
 
 import os
 import re
+import select
 import shutil
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -136,25 +152,84 @@ class A365CliMutator:
     def run(self, argv: list[str], *, timeout: float = 900.0) -> RunResult:
         if not self.available:
             raise CliInvocationError(argv, -1, f"{A365_CLI_BINARY} not on PATH")
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        if proc.returncode != 0:
-            combined = (proc.stderr + proc.stdout).strip()
-            match = _AADSTS_RE.search(combined)
+        returncode, combined = _run_streaming(argv, timeout=timeout)
+        if returncode != 0:
+            stripped = combined.strip()
+            match = _AADSTS_RE.search(stripped)
             if match:
-                raise AADSTSError(match.group(0), combined)
-            raise CliInvocationError(argv, proc.returncode, combined)
+                raise AADSTSError(match.group(0), stripped)
+            raise CliInvocationError(argv, returncode, stripped)
         return RunResult(
             argv=list(argv),
-            returncode=proc.returncode,
-            stdout=proc.stdout,
-            stderr=proc.stderr,
+            returncode=returncode,
+            stdout=combined,
+            stderr="",
         )
+
+
+# ---------------------------------------------------------------------------
+# Streaming subprocess helper
+# ---------------------------------------------------------------------------
+
+
+def _run_streaming(argv: list[str], *, timeout: float) -> tuple[int, str]:
+    """Run ``argv`` to completion, streaming combined output to ``sys.stdout``.
+
+    Returns ``(returncode, combined_output)``. Raises
+    :class:`subprocess.TimeoutExpired` if the wall-clock deadline is hit
+    (the partial captured output goes into ``output``).
+
+    Behaviour:
+
+    - ``stderr=STDOUT`` so chronological order is preserved across the
+      merged stream (a CLI that prints progress on stdout and warnings
+      on stderr would otherwise interleave incoherently).
+    - Lines are written to ``sys.stdout`` as they arrive — the operator
+      sees device-code prompts and CLI progress in real time.
+    - The captured copy is returned for AADSTS detection in :meth:`run`.
+
+    Tests patch this helper directly rather than reaching into Popen.
+    """
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None  # for type checkers; guaranteed by stdout=PIPE
+    buf: list[str] = []
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            now = time.monotonic()
+            remaining = deadline - now
+            if remaining <= 0:
+                proc.kill()
+                proc.wait(timeout=5)
+                raise subprocess.TimeoutExpired(
+                    cmd=argv, timeout=timeout, output="".join(buf)
+                )
+            ready, _, _ = select.select([proc.stdout], [], [], min(1.0, remaining))
+            if ready:
+                line = proc.stdout.readline()
+                if not line:
+                    break  # EOF
+                buf.append(line)
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            elif proc.poll() is not None:
+                tail = proc.stdout.read()
+                if tail:
+                    buf.append(tail)
+                    sys.stdout.write(tail)
+                    sys.stdout.flush()
+                break
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+    proc.wait(timeout=5)
+    return proc.returncode, "".join(buf)
 
 
 def get_mutator() -> Mutator:

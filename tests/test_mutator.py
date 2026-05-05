@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -55,21 +54,17 @@ class TestAADSTSError:
 # ---------------------------------------------------------------------------
 
 
-def _completed(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(
-        args=["a365"], returncode=returncode, stdout=stdout, stderr=stderr
-    )
-
-
 class TestA365CliMutatorRun:
     def test_success_returns_run_result(self) -> None:
         m = A365CliMutator()
         m.available = True  # bypass PATH check
-        with patch("mutator.subprocess.run", return_value=_completed(0, "ok\n", "")):
+        with patch("mutator._run_streaming", return_value=(0, "ok\n")):
             result = m.run(["a365", "setup", "blueprint", "--agent-name", "x"])
         assert isinstance(result, RunResult)
         assert result.returncode == 0
         assert result.stdout == "ok\n"
+        # Slice 18j: stderr is merged into stdout via subprocess STDOUT redirection.
+        assert result.stderr == ""
         assert result.argv == ["a365", "setup", "blueprint", "--agent-name", "x"]
 
     def test_unavailable_raises_cli_error(self) -> None:
@@ -85,23 +80,23 @@ class TestA365CliMutatorRun:
 
 
 class TestAADSTSExtraction:
-    def test_aadsts_code_in_stderr_raises_aadsts_error(self) -> None:
+    def test_aadsts_code_anywhere_raises_aadsts_error(self) -> None:
         m = A365CliMutator()
         m.available = True
         bad = "ERROR AADSTS500011: tenant license has not propagated yet"
         with (
-            patch("mutator.subprocess.run", return_value=_completed(2, "", bad)),
+            patch("mutator._run_streaming", return_value=(2, bad)),
             pytest.raises(AADSTSError) as excinfo,
         ):
             m.run(["a365", "setup", "blueprint"])
         assert excinfo.value.code == "AADSTS500011"
 
-    def test_aadsts_in_stdout_also_caught(self) -> None:
+    def test_aadsts_with_preceding_chatter_caught(self) -> None:
         m = A365CliMutator()
         m.available = True
         bad = "Some chatter\nAADSTS90094: admin consent required"
         with (
-            patch("mutator.subprocess.run", return_value=_completed(1, bad, "")),
+            patch("mutator._run_streaming", return_value=(1, bad)),
             pytest.raises(AADSTSError) as excinfo,
         ):
             m.run(["a365", "setup", "permissions", "bot"])
@@ -111,7 +106,7 @@ class TestAADSTSExtraction:
         m = A365CliMutator()
         m.available = True
         with (
-            patch("mutator.subprocess.run", return_value=_completed(7, "", "weird crash")),
+            patch("mutator._run_streaming", return_value=(7, "weird crash")),
             pytest.raises(CliInvocationError) as excinfo,
         ):
             m.run(["a365", "setup", "blueprint"])
