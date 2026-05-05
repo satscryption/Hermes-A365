@@ -28,11 +28,21 @@ def templates_dir() -> Path:
 
 
 def safe_run(argv: list[str], *, timeout: float = 5.0) -> str | None:
-    """Run a subprocess; return combined stdout+stderr on success, ``None`` on any failure.
+    """Run a subprocess; return combined stdout+stderr on success, ``None`` on failure.
 
-    Used by probes and reconcilers that need to shell out without raising.
-    Captures both streams so a tool that prints version info to stderr
-    (some `--version` implementations do) is still surfaced.
+    "Failure" means: ``OSError`` from spawning (binary not on PATH /
+    permission denied), :class:`subprocess.TimeoutExpired`, or a
+    non-zero exit code. Successful invocations return the combined
+    output string — **including the empty string** when the process
+    exited cleanly with no output. Slice 18m fixed the older
+    ``... or None`` contract that conflated empty-success with
+    failure (caused doctor's ``probe_custom_client_app`` to misread
+    "app not found" as "az not signed in?").
+
+    Used by probes and reconcilers that need to shell out without
+    raising. Captures both streams so a tool that prints version
+    info to stderr (some `--version` implementations do) is still
+    surfaced.
     """
     try:
         proc = subprocess.run(
@@ -46,7 +56,7 @@ def safe_run(argv: list[str], *, timeout: float = 5.0) -> str | None:
         return None
     if proc.returncode != 0:
         return None
-    return (proc.stdout + proc.stderr).strip() or None
+    return (proc.stdout + proc.stderr).strip()
 
 
 def tcp_reachable(host: str, *, port: int = 443, timeout: float = 3.0) -> bool:

@@ -5,15 +5,18 @@ Coverage focus:
 - ``render_diff_human`` — readability.
 - ``slugify`` — used by cleanup + status to map a CLI display name onto
   the local ``~/.hermes/agents/<slug>/`` dir.
+- ``safe_run`` — slice 18m pinned the empty-vs-failure distinction.
 
-The other helpers (``safe_run``, ``tcp_reachable``, ``parse_env``) are
-exercised through the doctor tests (``tests/test_doctor.py``).
+``tcp_reachable`` and ``parse_env`` are exercised through the doctor
+tests (``tests/test_doctor.py``).
 """
 
 from __future__ import annotations
 
+import sys
+
 import pytest
-from _common import deep_diff, render_diff_human, slugify
+from _common import deep_diff, render_diff_human, safe_run, slugify
 
 
 class TestSlugify:
@@ -147,3 +150,46 @@ class TestRenderDiffHuman:
         # Sort order is alphabetical by path.
         assert "very/long/path" in lines[0]
         assert "x" in lines[1]
+
+
+class TestSafeRun:
+    """Pin the slice 18m contract: ``None`` only on real failure;
+    successful empty stdout returns ``""`` (not ``None``)."""
+
+    def test_success_with_output_returns_string(self) -> None:
+        out = safe_run([sys.executable, "-c", "print('hello')"])
+        assert out == "hello"
+
+    def test_success_with_no_output_returns_empty_string(self) -> None:
+        # Critical regression: previously returned ``None`` because of the
+        # ``... or None`` clause. Doctor's `probe_custom_client_app` then
+        # misread "no app found" as "az not signed in?".
+        out = safe_run([sys.executable, "-c", "pass"])
+        assert out == ""
+
+    def test_nonzero_exit_returns_none(self) -> None:
+        out = safe_run([sys.executable, "-c", "import sys; sys.exit(1)"])
+        assert out is None
+
+    def test_missing_binary_returns_none(self) -> None:
+        out = safe_run(["/nonexistent/binary-that-does-not-exist-xyz"])
+        assert out is None
+
+    def test_timeout_returns_none(self) -> None:
+        out = safe_run(
+            [sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.1
+        )
+        assert out is None
+
+    def test_stdout_and_stderr_combined(self) -> None:
+        out = safe_run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.write('out'); sys.stderr.write('err')",
+            ]
+        )
+        # Order is not guaranteed across platforms — both streams present.
+        assert out is not None
+        assert "out" in out
+        assert "err" in out

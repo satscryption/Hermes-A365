@@ -96,9 +96,8 @@ amber paths:
   `--cask powershell` is deprecated as of 2026-05; use the formula).
 - `Agent 365 CLI` client app not discoverable → either register it per
   Microsoft's docs, or rename your existing operator-managed app's
-  display name to `Agent 365 CLI` (the appId stays stable). ⚠️ Doctor's
-  WARN message currently misreads "app not found" as "az not signed
-  in?" — fix queued for slice 18j.
+  display name to `Agent 365 CLI` (the appId stays stable). The WARN
+  message now reports "no Entra app named …" precisely (slice 18m).
 - Network probe failing → corporate proxy. Doctor honours `HTTPS_PROXY`.
 - `~/.hermes/.env` missing → step 0 above.
 
@@ -419,8 +418,8 @@ fix; none requires architectural rework except the last.
 
 | # | File / area | Symptom |
 |---|---|---|
-| 1 | `_common.py:48` `safe_run` | Returns `None` for empty stdout+stderr success, conflated with failure (the `or None` clause). Affects probes that expect empty as a valid result. |
-| 2 | `doctor.py probe_custom_client_app` | When the app isn't found, the WARN message says "az not signed in?" — actual cause is `safe_run` (#1) returning `None`. Misleading. |
+| 1 | `_common.py:48` `safe_run` | ~~Returns `None` for empty stdout+stderr success~~. **Fixed in slice 18m** — empty success now returns `""`; `None` reserved for real failure (timeout, OSError, non-zero exit). |
+| 2 | `doctor.py probe_custom_client_app` | ~~Misleading "az not signed in?" on app-not-found.~~ **Fixed in slice 18m** as a downstream of #1 — the probe's branching was already correct, just fed the wrong contract. The "no Entra app named X" branch now triggers as intended. |
 | 3 | `doctor.py probe_custom_client_app` | Hard-codes `"Agent 365 CLI"`. Allow operator override via `~/.hermes/.env` or a flag. |
 | 4 | `license.py` reason text | Renders nonsensical "users=N < 25 or plan=E5 < E5" stringification. |
 | 5 | `license.py` / SKILL.md / runbook | Earlier docs claimed `license` writes `A365_LICENSE_MODEL` to `~/.hermes/.env`. It doesn't. Either implement or drop the claim from docs. |
