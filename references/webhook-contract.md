@@ -142,3 +142,37 @@ bump the version.
   immediately and then push the real reply via a separate proactive
   pattern. Streaming + proactive replies are not yet implemented in
   the bridge (slice 19b ships synchronous only).
+
+## Reference responder (slice 19c)
+
+A working demo / smoke-test responder ships at
+`scripts/hermes_responder.py`. Three modes:
+
+```bash
+# Echo mode (default) — replies "You said: <text>"
+uv run python scripts/hermes_responder.py serve --port 9090
+
+# Greeting mode — Adaptive Card on first message in a conversation,
+# echo on subsequent. Useful for screencaps.
+uv run python scripts/hermes_responder.py serve --mode greeting
+
+# Canned mode — read response from JSON file, hot-reloaded per
+# request so operators iterate without restarting.
+echo '{"text": "Hello from canned"}' > responses.json
+uv run python scripts/hermes_responder.py serve --mode canned \
+    --canned-response-file ./responses.json
+```
+
+Optional flags:
+- `--slug <slug>` — log JSON-line per turn to
+  `~/.hermes/agents/<slug>/responder.log`. Without `--slug`, logs go
+  to stdout.
+- `--debug-endpoints` — enables `GET /history/<conversation-id>` for
+  inspection. Off by default.
+- `--history-max <n>` — per-conversation ring-buffer cap (default 50).
+
+The reference responder is an MVP — it doesn't call an LLM or the
+Hermes agent loop. It exists to prove the wire end-to-end (tunnel →
+bridge JWT validation → webhook → reply via `serviceUrl` → Adaptive
+Card render in Teams). Operators with a real responder swap it in
+via `HERMES_BRIDGE_WEBHOOK`.

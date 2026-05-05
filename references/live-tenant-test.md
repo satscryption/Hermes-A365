@@ -388,6 +388,57 @@ in 19b.
 - [ ] `bridge verify` returns 0 (or 1 with only the documented
       AADSTS7000218 / OTLP-DNS warnings) against the fresh tenant.
 
+## 9c. activity-bridge serve + reference responder (slices 19b + 19c) — Teams round-trip
+
+Validates the full runtime path. This is the round-3 step the round-2
+walkthrough couldn't reach.
+
+Prerequisites:
+
+- `botMsaAppId` populated in `a365.generated.config.json`. The
+  default `setup blueprint` (without `--m365`) leaves it `null`. Run
+
+  ```bash
+  uv run python scripts/activity_bridge.py update-endpoint \
+      --agent-name "<display-name>" \
+      --url https://<tunnel>.trycloudflare.com/api/messages --apply
+  ```
+
+  This passes `--m365` under the hood (provisioning the bot
+  identity + populating `botMsaAppId`) and pins the messaging
+  endpoint to your tunnel.
+- `cloudflared` installed locally (`brew install cloudflared`).
+
+Stand up three processes:
+
+```bash
+# 1. Tunnel — exposes the bridge port to A365's BF infra.
+cloudflared tunnel --url http://localhost:3978 &
+# Take the trycloudflare.com URL it prints.
+
+# 2. Reference responder.
+uv run python scripts/hermes_responder.py serve \
+    --port 9090 --mode greeting --slug inbox-helper &
+
+# 3. Bridge.
+HERMES_BRIDGE_WEBHOOK=http://127.0.0.1:9090/respond \
+    uv run python scripts/activity_bridge.py serve \
+        --slug inbox-helper --port 3978 &
+```
+
+Send a test message in the Teams 1:1 chat with the agent.
+
+- [ ] First Teams message from a fresh chat returns the greeting
+      Adaptive Card.
+- [ ] Subsequent messages return `You said: <text>`.
+- [ ] `~/.hermes/agents/inbox-helper/responder.log` accumulates one
+      JSON-line per turn.
+- [ ] `~/.hermes/agents/inbox-helper/bridge.log` shows JWT-validated
+      activity ingress + reply via `serviceUrl`.
+
+If the responder returns 200 but Teams shows nothing, the bridge log
+is the place to look — that's where outbound reply errors surface.
+
 ## 10. cleanup — leave the tenant clean
 
 Slice 18l fixed the argv composition (bug #11) and the local-dir
