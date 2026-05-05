@@ -55,6 +55,11 @@ _HERMES_HOME_DEFAULT = "~/.hermes"
 # but the spec / docs default is this string; doctor reports a warning if
 # nothing matches, with the URL the operator follows to fix it.
 DEFAULT_CLIENT_APP_NAME = "Agent 365 CLI"
+
+# Slice 18r (bug #3): operators with a non-default client-app name can
+# set this env var to skip the rename. Looked up at probe time so the
+# shell `export` route works without re-importing.
+CLIENT_APP_NAME_ENV = "A365_CLIENT_APP_NAME"
 CUSTOM_CLIENT_APP_DOCS = (
     "https://learn.microsoft.com/microsoft-agent-365/developer/custom-client-app-registration"
 )
@@ -150,14 +155,23 @@ def probe_powershell() -> ProbeResult:
     )
 
 
-def probe_custom_client_app(*, name: str = DEFAULT_CLIENT_APP_NAME) -> ProbeResult:
+def probe_custom_client_app(*, name: str | None = None) -> ProbeResult:
     """Best-effort: ask az whether the operator-managed client app exists.
 
     A miss isn't fatal — operators may have named the app differently —
     but it's a warn so the operator can confirm. The CLI itself will
     fail clearly later if the app doesn't exist or its permissions are
     wrong (see ``a365 setup requirements`` for the authoritative check).
+
+    If ``name`` is not given, reads ``A365_CLIENT_APP_NAME`` from the
+    environment, falling back to :data:`DEFAULT_CLIENT_APP_NAME`. The
+    underlying ``a365`` CLI hard-codes the default; operators with a
+    different name need to either rename the Entra app to match (the
+    appId stays stable) or accept that the CLI itself won't find it
+    until they do.
     """
+    if name is None:
+        name = os.environ.get(CLIENT_APP_NAME_ENV) or DEFAULT_CLIENT_APP_NAME
     if not shutil.which("az"):
         return ProbeResult(
             "custom_client_app",

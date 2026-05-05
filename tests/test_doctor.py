@@ -156,6 +156,46 @@ class TestProbeCustomClientApp:
     def test_constants_pinned(self) -> None:
         assert DEFAULT_CLIENT_APP_NAME == "Agent 365 CLI"
 
+    def test_env_var_overrides_default_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Slice 18r (bug #3): operators with a custom client-app name can
+        set A365_CLIENT_APP_NAME to skip the rename."""
+        monkeypatch.setenv("A365_CLIENT_APP_NAME", "Agent365-CLI-OpenClaw")
+        captured: list[list[str]] = []
+
+        def fake_safe_run(argv: list[str], **_: object) -> str:
+            captured.append(argv)
+            return "11111111-2222-3333-4444-555555555555"
+
+        with (
+            patch("doctor.shutil.which", return_value="/usr/bin/az"),
+            patch("doctor.safe_run", side_effect=fake_safe_run),
+        ):
+            r = probe_custom_client_app()
+        assert r.state == "ok"
+        # The query should have used the env-var name, not the default.
+        assert "Agent365-CLI-OpenClaw" in captured[0]
+        assert "Agent 365 CLI" not in captured[0]
+
+    def test_explicit_name_arg_wins_over_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("A365_CLIENT_APP_NAME", "From-Env")
+        captured: list[list[str]] = []
+
+        def fake_safe_run(argv: list[str], **_: object) -> str:
+            captured.append(argv)
+            return "11111111-2222-3333-4444-555555555555"
+
+        with (
+            patch("doctor.shutil.which", return_value="/usr/bin/az"),
+            patch("doctor.safe_run", side_effect=fake_safe_run),
+        ):
+            probe_custom_client_app(name="From-Arg")
+        assert "From-Arg" in captured[0]
+        assert "From-Env" not in captured[0]
+
 
 # ---------------------------------------------------------------------------
 # probe_keychain

@@ -98,6 +98,10 @@ amber paths:
   Microsoft's docs, or rename your existing operator-managed app's
   display name to `Agent 365 CLI` (the appId stays stable). The WARN
   message now reports "no Entra app named …" precisely (slice 18m).
+  Operators who can't rename can set `A365_CLIENT_APP_NAME=<their-name>`
+  (slice 18r) — but the underlying `a365` CLI still hard-codes the
+  default, so that override only quiets our wrapper, not the real
+  CLI's own lookup.
 - Network probe failing → corporate proxy. Doctor honours `HTTPS_PROXY`.
 - `~/.hermes/.env` missing → step 0 above.
 
@@ -416,7 +420,7 @@ fix; none requires architectural rework except the last.
 |---|---|---|
 | 1 | `_common.py:48` `safe_run` | ~~Returns `None` for empty stdout+stderr success~~. **Fixed in slice 18m** — empty success now returns `""`; `None` reserved for real failure (timeout, OSError, non-zero exit). |
 | 2 | `doctor.py probe_custom_client_app` | ~~Misleading "az not signed in?" on app-not-found.~~ **Fixed in slice 18m** as a downstream of #1 — the probe's branching was already correct, just fed the wrong contract. The "no Entra app named X" branch now triggers as intended. |
-| 3 | `doctor.py probe_custom_client_app` | Hard-codes `"Agent 365 CLI"`. Allow operator override via `~/.hermes/.env` or a flag. |
+| 3 | `doctor.py probe_custom_client_app` | ~~Hard-codes `"Agent 365 CLI"`.~~ **Fixed in slice 18r** — set `A365_CLIENT_APP_NAME` in the environment to override the lookup. The probe still warns when the named app isn't found, with the canonical-name reminder. The underlying `a365` CLI itself still hard-codes the default; operators with a non-default app name need to either rename the Entra app or accept that `setup blueprint` won't find it until they do. |
 | 4 | `license.py` reason text | ~~Renders nonsensical "users=N < 25 or plan=E5 < E5"~~. **Fixed in slice 18o** — only the predicate(s) that actually fired are reported, joined by " and " when both apply. |
 | 5 | `license.py` / SKILL.md / runbook | ~~Earlier docs claimed `license` writes `A365_LICENSE_MODEL` to `~/.hermes/.env`.~~ **Doc-fixed in slices 18i + 18o** — runbook step 2 and `references/license-cost-table.md` no longer make the promise; license stays read-only as its docstring says. |
 | 6 | `license.py` SKU naming | ~~Recommends "Agent 365 add-on" / "E7" without naming the actual `subscribedSkus` partNumber.~~ **Fixed in slice 18o** — both labels now include the partNumber (`MICROSOFT_AGENT_365_TIER_3` / `MICROSOFT_365_E7`); operators can grep `subscribedSkus` directly. |
