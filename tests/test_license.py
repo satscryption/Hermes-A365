@@ -72,11 +72,20 @@ class TestDecisionRule:
     def test_small_team_e3(self) -> None:
         rec = recommend(LicenseInputs(users=10, agents=2, plan="E3"))
         assert rec.model == "per_agent"
-        assert "< 25" in rec.rationale or "< E5" in rec.rationale
+        # Slice 18o (bug #4): both predicates fire for users=10/plan=E3 —
+        # rationale joins them with " and " rather than the old " or "
+        # template that produced nonsense like "plan=E5 < E5".
+        assert "users=10 < 25" in rec.rationale
+        assert "plan=E3 below E5" in rec.rationale
+        assert " and " in rec.rationale
 
     def test_small_team_e5(self) -> None:
         rec = recommend(LicenseInputs(users=10, agents=2, plan="E5"))
         assert rec.model == "per_agent"
+        # Slice 18o (bug #4): only the user-threshold predicate is true;
+        # rationale must NOT mention the (false) plan predicate.
+        assert "users=10 < 25" in rec.rationale
+        assert "below E5" not in rec.rationale
 
     def test_large_team_e5_no_security_bundle(self) -> None:
         rec = recommend(LicenseInputs(users=200, agents=10, plan="E5"))
@@ -186,6 +195,22 @@ class TestRenderHuman:
         inputs = LicenseInputs(users=5, agents=1, plan="E3")
         text = render_human(inputs, recommend(inputs))
         assert "never purchases" in text.lower() or "manual" in text.lower()
+
+    def test_render_surfaces_subscribed_skus_partnumber(self) -> None:
+        # Slice 18o (bug #6): operators look at `subscribedSkus` to verify
+        # what's installed; the recommendation must name the actual
+        # partNumber so that lookup is unambiguous.
+        addon = render_human(
+            LicenseInputs(users=5, agents=1, plan="E3"),
+            recommend(LicenseInputs(users=5, agents=1, plan="E3")),
+        )
+        assert "MICROSOFT_AGENT_365_TIER_3" in addon
+
+        e7_inputs = LicenseInputs(
+            users=200, agents=10, plan="E5", bundled_security_wanted=True
+        )
+        e7 = render_human(e7_inputs, recommend(e7_inputs))
+        assert "MICROSOFT_365_E7" in e7
 
 
 # ---------------------------------------------------------------------------

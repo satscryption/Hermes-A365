@@ -126,15 +126,14 @@ device-code prompt on first run for cached-token bootstrap.
 uv run python scripts/license.py --users 5 --agents 1 --plan E5
 ```
 
-**Pass criterion:** prints a recommendation and exits 0. ⚠️ The
-recommendation strings refer to "Agent 365 add-on" and "E7" — those
-are marketing names that don't exist in `subscribedSkus` (the actual
-SKU is `MICROSOFT_AGENT_365_TIER_3`). The reason text also has a
-stringification bug ("plan=E5 < E5"). Both queued for slice 18j;
-neither blocks. The earlier draft claimed this step writes
-`A365_LICENSE_MODEL` into `~/.hermes/.env` — it doesn't.
+**Pass criterion:** prints a recommendation and exits 0. The
+recommendation now names the actual `subscribedSkus` partNumber
+(`MICROSOFT_AGENT_365_TIER_3` for the add-on; `MICROSOFT_365_E7`
+for the bundle) so it lines up with what `az rest --url
+.../subscribedSkus` shows in the tenant. License is read-only and
+never writes to `~/.hermes/.env`.
 
-- [ ] `license` recommendation rendered.
+- [ ] `license` recommendation rendered with the partNumber visible.
 
 ## 3. register — `setup blueprint` + `setup permissions {mcp,bot}`
 
@@ -421,9 +420,9 @@ fix; none requires architectural rework except the last.
 | 1 | `_common.py:48` `safe_run` | ~~Returns `None` for empty stdout+stderr success~~. **Fixed in slice 18m** — empty success now returns `""`; `None` reserved for real failure (timeout, OSError, non-zero exit). |
 | 2 | `doctor.py probe_custom_client_app` | ~~Misleading "az not signed in?" on app-not-found.~~ **Fixed in slice 18m** as a downstream of #1 — the probe's branching was already correct, just fed the wrong contract. The "no Entra app named X" branch now triggers as intended. |
 | 3 | `doctor.py probe_custom_client_app` | Hard-codes `"Agent 365 CLI"`. Allow operator override via `~/.hermes/.env` or a flag. |
-| 4 | `license.py` reason text | Renders nonsensical "users=N < 25 or plan=E5 < E5" stringification. |
-| 5 | `license.py` / SKILL.md / runbook | Earlier docs claimed `license` writes `A365_LICENSE_MODEL` to `~/.hermes/.env`. It doesn't. Either implement or drop the claim from docs. |
-| 6 | `license.py` SKU naming | Recommends "Agent 365 add-on" / "E7" — the actual GA SKU is `MICROSOFT_AGENT_365_TIER_3`. Update `references/license-cost-table.md` too. |
+| 4 | `license.py` reason text | ~~Renders nonsensical "users=N < 25 or plan=E5 < E5"~~. **Fixed in slice 18o** — only the predicate(s) that actually fired are reported, joined by " and " when both apply. |
+| 5 | `license.py` / SKILL.md / runbook | ~~Earlier docs claimed `license` writes `A365_LICENSE_MODEL` to `~/.hermes/.env`.~~ **Doc-fixed in slices 18i + 18o** — runbook step 2 and `references/license-cost-table.md` no longer make the promise; license stays read-only as its docstring says. |
+| 6 | `license.py` SKU naming | ~~Recommends "Agent 365 add-on" / "E7" without naming the actual `subscribedSkus` partNumber.~~ **Fixed in slice 18o** — both labels now include the partNumber (`MICROSOFT_AGENT_365_TIER_3` / `MICROSOFT_365_E7`); operators can grep `subscribedSkus` directly. |
 | 7 | `register.py` rendered argv | Multi-word agent names render unquoted (`--agent-name Hermes Inbox Helper`). Fine for the actual subprocess call (passed as list), misleading if a user copy-pastes. |
 | 8 | `consent.py` | ~~Calls `qs.query_consent(app_id=...)`, a method that doesn't exist on the v0.2 `QuerySource` protocol.~~ **Fixed in slice 18k** — polling now uses `query_blueprint_scopes` and shares the `_classify_scopes_output` heuristic with `status.py`. CLI takes a positional `agent_name` (omittable when `--print-url-only`). |
 | 9 | `instance_create.py` | ~~Writes a leftover `A365_CLI_VARIANT` key (v0.1 artefact).~~ **Fixed in slice 18n** — field, template line, validation, CLI flag, and golden files all dropped. |

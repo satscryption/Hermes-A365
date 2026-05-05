@@ -1,6 +1,7 @@
 # A365 license decision matrix
 
-Snapshot date: 2026-05-04 (verified against live tenant)
+Snapshot date: 2026-05-05 (verified against live tenant during the
+walkthrough; refreshed in slice 18o for SKU naming corrections)
 
 Pricing source: Microsoft public list prices as of GA (2026-05-01).
 Update this file when Microsoft publishes new pricing tiers; the
@@ -31,17 +32,42 @@ Copilot/Defender/Purview are also adopted. At 250 seats:
 E7 is rarely cost-justified on A365 alone; flag with FinOps before
 recommending it.
 
-## Recorded as
+## Verifying assigned licences
 
-The chosen SKU is recorded in `~/.hermes/.env` as:
+`hermes a365 license` is read-only — it never writes to
+`~/.hermes/.env`. To check what's actually assigned to a user:
 
+```bash
+az rest --method GET \
+    --url "https://graph.microsoft.com/v1.0/users/<upn>/licenseDetails" \
+    --query "value[].skuPartNumber" -o json
 ```
-A365_LICENSE_MODEL=per_agent  # add-on
-A365_LICENSE_MODEL=e7         # E7 bundle
+
+For tenant-wide seat utilisation:
+
+```bash
+az rest --method GET --url "https://graph.microsoft.com/v1.0/subscribedSkus" \
+    --query "value[].{sku:skuPartNumber, prepaid:prepaidUnits.enabled, consumed:consumedUnits}" \
+    -o table
 ```
 
-`hermes a365 status` surfaces the model alongside seat utilisation
-(`<used> of <total>`) from `query-entra --license`.
+⚠️ Tenants that already hold a Microsoft 365 Business / Enterprise
+SKU containing the `OFFICESUBSCRIPTION` service plan will collide
+with `MICROSOFT_AGENT_365_TIER_3`'s `OFFICESUBSCRIPTION`. Disable
+the conflicting plan when assigning Tier 3:
+
+```bash
+az rest --method POST \
+    --url "https://graph.microsoft.com/v1.0/users/<upn>/assignLicense" \
+    --headers "Content-Type=application/json" \
+    --body '{"addLicenses":[{"skuId":"<tier-3-skuId>",
+        "disabledPlans":["43de0ff5-c92c-492b-9116-175376d08c38"]}],
+        "removeLicenses":[]}'
+```
+
+The conflicting service plan id (`43de0ff5-…`) is the GA Office
+productivity SKU; suppressing it keeps the user's existing Office
+plan intact.
 
 ## Admin centre purchase URLs
 

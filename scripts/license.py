@@ -30,6 +30,17 @@ PRICE_E7_PER_USER_MONTHLY = 99  # USD
 ADDON_THRESHOLD_USERS = 25
 ADMIN_CENTER_CATALOG_URL = "https://admin.microsoft.com/Adminportal/Home#/catalog"
 
+# Microsoft Graph `subscribedSkus` partNumbers. Slice 18o (bug #6)
+# surfaces these alongside the marketing names so operators can match
+# the recommendation against `az rest --url
+# https://graph.microsoft.com/v1.0/subscribedSkus` output. The E7
+# partNumber is still TBD — not seen in the 2026-05-05 walkthrough's
+# test tenant; ``MICROSOFT_365_E7`` is the most likely shape.
+SKU_PART_NUMBERS: dict[str, str] = {
+    "per_agent": "MICROSOFT_AGENT_365_TIER_3",
+    "e7": "MICROSOFT_365_E7",  # unverified; see references/license-cost-table.md
+}
+
 LicenseModel = Literal["per_agent", "e7"]
 
 # M365 plan tier ordering. Spec only references E3 / E5 / E7 explicitly.
@@ -71,10 +82,19 @@ def recommend(inputs: LicenseInputs) -> LicenseRecommendation:
         raise ValueError(f"unknown plan {inputs.plan!r}; expected one of {sorted(PLAN_TIERS)}")
 
     plan_tier = PLAN_TIERS[inputs.plan]
+    below_user_threshold = inputs.users < ADDON_THRESHOLD_USERS
+    below_e5 = plan_tier < PLAN_TIERS["E5"]
 
-    if inputs.users < ADDON_THRESHOLD_USERS or plan_tier < PLAN_TIERS["E5"]:
+    if below_user_threshold or below_e5:
         model: LicenseModel = "per_agent"
-        rationale = f"users={inputs.users} < {ADDON_THRESHOLD_USERS} or plan={inputs.plan} < E5"
+        # Slice 18o (bug #4): only report the predicate(s) that
+        # actually fired. Used to render nonsensical "plan=E5 < E5".
+        reasons: list[str] = []
+        if below_user_threshold:
+            reasons.append(f"users={inputs.users} < {ADDON_THRESHOLD_USERS}")
+        if below_e5:
+            reasons.append(f"plan={inputs.plan} below E5")
+        rationale = " and ".join(reasons)
     elif inputs.bundled_security_wanted:
         model = "e7"
         rationale = (
@@ -114,9 +134,10 @@ def recommend(inputs: LicenseInputs) -> LicenseRecommendation:
 
 
 def _model_label(model: LicenseModel) -> str:
+    sku = SKU_PART_NUMBERS[model]
     if model == "per_agent":
-        return f"Agent 365 add-on (${PRICE_ADDON_PER_USER_MONTHLY}/user/mo)"
-    return f"Microsoft 365 E7 (${PRICE_E7_PER_USER_MONTHLY}/user/mo)"
+        return f"Agent 365 add-on — `{sku}` (${PRICE_ADDON_PER_USER_MONTHLY}/user/mo)"
+    return f"Microsoft 365 E7 — `{sku}` (${PRICE_E7_PER_USER_MONTHLY}/user/mo)"
 
 
 def render_human(inputs: LicenseInputs, rec: LicenseRecommendation) -> str:
