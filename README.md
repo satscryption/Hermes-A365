@@ -6,10 +6,15 @@ control plane that GA'd 2026-05-01.
 
 ## Status
 
-**v0.2 functionally complete.** Setup, lifecycle, and runtime layers are
-all in place; one open external defect (a Microsoft CLI bug) and one
-deferred runtime feature (BF response streaming) remain. Live-tenant
-walkthrough completed end-to-end through the wrappers on 2026-05-05.
+**v0.2 setup/lifecycle complete; runtime auth layer needs OBO refactor.**
+Setup, status, license, cleanup, `bridge verify` paths all work
+end-to-end against a live tenant. **`bridge serve` outbound auth is
+broken** for A365 blueprint apps as of round-3 walkthrough on
+2026-05-05 — Microsoft's `AADSTS82001` policy blocks
+`client_credentials` for "Agentic applications" on messaging
+resources. Tracked as [#6](https://github.com/satscryption/Hermes-A365/issues/6);
+fix is to refactor outbound auth to OBO. Until then, the bridge
+ships and verifies, but cannot send replies in production.
 
 ```
                      ┌─────────────────────────────────────────────────┐
@@ -26,7 +31,7 @@ walkthrough completed end-to-end through the wrappers on 2026-05-05.
 | **Per-agent runtime config** (`instance create`) | Local-only `.env` writer; UUID generation deferred to apply-time; secret never on disk. |
 | **Manifest publish** (`publish`) | Branches between AI-Teammate (zip) and blueprint-only (Graph API instance registration); operator messaging is honest about which artefact each flow produces. |
 | **Cleanup** | Drives `cleanup azure → instance → blueprint`, pre-feeds `y\n` to defeat the GA CLI's prompts, leaves `chmod 600` on backup files. |
-| **Activity bridge** | Two subcommands shipped: `verify` (config + auth + reachability diagnostic) and `serve` (long-running BF webhook adapter, JWT-validated, replies via `serviceUrl`, forwards to an operator-defined `HERMES_BRIDGE_WEBHOOK`). MVP scope; streaming + proactive long-running deferred. |
+| **Activity bridge** | `verify` (config + auth + reachability diagnostic) ships and works. `serve` (long-running BF webhook adapter) ships but the outbound auth is **broken for A365 blueprint apps** until the OBO refactor in [#6](https://github.com/satscryption/Hermes-A365/issues/6) lands. JWT-validated inbound, webhook forwarding, and reply rendering all work; `acquire_bot_token` does not. |
 | **Live-tenant runbook** | [`references/live-tenant-test.md`](references/live-tenant-test.md). Walked round-2 successfully; round-3 (with the bridge) pending operator action. |
 
 **Known external blocker.** The GA `a365 setup permissions bot` only
@@ -217,6 +222,10 @@ External issues filed:
 
 Open issues in this repo (run `gh issue list` for current state):
 
+- **[#6](../../issues/6)** — **Bridge outbound auth needs OBO refactor.**
+  `AADSTS82001` blocks `client_credentials` for A365 blueprint apps
+  on messaging resources; canonical pattern is OBO. Highest priority —
+  this is the round-3 blocker.
 - **[#1](../../issues/1)** — Tier 3 responder (Hermes-native). Blocked
   on Hermes#20133 + SPEC §10 Q1.
 - **[#2](../../issues/2)** — Tier 2 responder (LLM-backed,
@@ -271,6 +280,16 @@ Slice timeline since v0.2 work began:
   [Hermes#20133](https://github.com/NousResearch/hermes-agent/issues/20133)
   proposing `hermes-a365` as an official optional skill. Drafts
   archived under [`docs/submissions/`](docs/submissions/).
+- **2026-05-05** — round-3 walkthrough: provisioned a fresh blueprint,
+  ran update-endpoint to register a `cloudflared` tunnel as the
+  messaging endpoint, and discovered Microsoft's `AADSTS82001` policy
+  blocks the bridge's `client_credentials` outbound auth for A365
+  blueprint apps on messaging resources. The bridge's wire is correct
+  but the auth model is wrong; OBO refactor needed. Filed as
+  [#6](https://github.com/satscryption/Hermes-A365/issues/6) (slice
+  19d findings; CLI quirk that `a365 publish` clobbers
+  `agentBlueprintClientSecret` from the local generated config also
+  documented in the issue). Tenant cleaned up post-walkthrough.
 
 Older v0.1 slice history (1–17) lived in this README until 2026-05-05;
 it was a slice-by-slice trail that grew unwieldy. The canonical

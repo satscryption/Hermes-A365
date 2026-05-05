@@ -1162,6 +1162,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
         f"  pid:     {cfg.pid_path}\n"
         f"  log:     {cfg.log_path}\n"
         f"  jwt:     {'DISABLED — DEV ONLY' if cfg.skip_jwt_validation else 'enabled'}\n"
+        "\n"
+        "WARNING: outbound replies use `client_credentials` against\n"
+        "  api.botframework.com — Microsoft's AADSTS82001 policy\n"
+        "  blocks this for A365 blueprint apps. Replies will fail at\n"
+        "  send_reply until the OBO refactor lands. See:\n"
+        "  https://github.com/satscryption/Hermes-A365/issues/6\n"
+        "  (verify, JWT validation, webhook forwarding all work fine.)\n"
     )
     sys.stdout.flush()
 
