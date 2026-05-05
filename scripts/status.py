@@ -316,13 +316,22 @@ def _skipped(name: str, *, reason: str = "a365 CLI unavailable") -> StatusCompon
     return StatusComponent(name, _SKIPPED, reason)
 
 
-_CONSENTED_HINTS = ("consented", "granted")
+# Slice 18v: the GA `a365 query-entra blueprint-scopes` doesn't actually
+# print "consented" or "granted" — it prints "Successfully retrieved
+# inheritable permissions from Graph API" then lists each resource under
+# an `Inheritable Scopes:` header. Slice 18q tightened the hint list
+# (dropped "ok" because of substring false-positives) but didn't replace
+# it with a hint that matches real CLI output, so the classifier
+# returned "warn" for actually-consented blueprints. The hints below
+# are pinned against verified v1.1.171 output (round-2 walkthrough,
+# 2026-05-05).
+_CONSENTED_HINTS = (
+    "consented",
+    "granted",
+    "inheritable scopes",
+    "successfully retrieved",
+)
 _NOT_CONSENTED_HINTS = ("not consented", "missing", "not granted", "consent required")
-# `"ok"` was in _CONSENTED_HINTS until slice 18q; substring-matched
-# inside words like "token", "look", "broken", "blocked", which made the
-# classifier latch onto debug output and report scopes as consented when
-# they weren't. The CLI's actual consented language is "consented" /
-# "granted"; "ok" added no positive signal.
 
 # Lines the CLI emits as progress markers rather than data. The 2026-05-05
 # walkthrough caught the unclassifiable-warn path latching onto

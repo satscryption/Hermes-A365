@@ -163,10 +163,12 @@ _DESCRIPTIONS: dict[CleanupKind, str] = {
 
 
 def _step_argv(kind: CleanupKind, inputs: CleanupInputs) -> list[str]:
-    # `-y` is a parent-only flag in the GA CLI (`a365 cleanup -y`), not
-    # accepted on the subcommand. The 2026-05-05 walkthrough caught
-    # the wrong placement (bug #11): `a365 cleanup azure --yes` errors
-    # immediately with "Unrecognized command or argument '--yes'".
+    # `-y` lives on the parent `cleanup` verb in the GA help text, but
+    # empirically it does NOT propagate to subcommands — slice 18w's
+    # round-2 walkthrough caught `a365 cleanup -y blueprint ...` still
+    # prompting "Continue with blueprint cleanup? (y/N):" and exiting
+    # with rc=1 on empty stdin. So we keep `-y` (harmless redundancy +
+    # documented intent) AND `apply_cleanup_plan` pipes `y\n` to stdin.
     argv = ["a365", "cleanup", "-y", kind, "--agent-name", inputs.agent_name]
     if inputs.tenant_id:
         argv.extend(["--tenant-id", inputs.tenant_id])
@@ -233,7 +235,10 @@ def apply_cleanup_plan(
     result = CleanupResult(plan=plan)
 
     for step in plan.steps:
-        mutator.run(step.argv)
+        # Pre-feed `y\n` for the GA CLI's "Continue with X cleanup? (y/N):"
+        # prompt that `-y` on the parent verb doesn't actually suppress
+        # for subcommands. Slice 18w (corrects the gap left by 18l).
+        mutator.run(step.argv, stdin_input="y\n")
         result.completed.append(step.kind)
         result.messages.append(f"[apply] {step.kind}: {step.description} — done")
 

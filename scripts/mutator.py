@@ -116,7 +116,13 @@ class Mutator(Protocol):
 
     available: bool
 
-    def run(self, argv: list[str], *, timeout: float = 900.0) -> RunResult: ...
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: float = 900.0,
+        stdin_input: str | None = None,
+    ) -> RunResult: ...
 
 
 # ---------------------------------------------------------------------------
@@ -149,10 +155,18 @@ class A365CliMutator:
                     os.environ["DOTNET_ROOT"] = candidate
                     break
 
-    def run(self, argv: list[str], *, timeout: float = 900.0) -> RunResult:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: float = 900.0,
+        stdin_input: str | None = None,
+    ) -> RunResult:
         if not self.available:
             raise CliInvocationError(argv, -1, f"{A365_CLI_BINARY} not on PATH")
-        returncode, combined = _run_streaming(argv, timeout=timeout)
+        returncode, combined = _run_streaming(
+            argv, timeout=timeout, stdin_input=stdin_input
+        )
         if returncode != 0:
             stripped = combined.strip()
             match = _AADSTS_RE.search(stripped)
@@ -172,7 +186,12 @@ class A365CliMutator:
 # ---------------------------------------------------------------------------
 
 
-def _run_streaming(argv: list[str], *, timeout: float) -> tuple[int, str]:
+def _run_streaming(
+    argv: list[str],
+    *,
+    timeout: float,
+    stdin_input: str | None = None,
+) -> tuple[int, str]:
     """Run ``argv`` to completion, streaming combined output to ``sys.stdout``.
 
     Returns ``(returncode, combined_output)``. Raises
@@ -186,17 +205,31 @@ def _run_streaming(argv: list[str], *, timeout: float) -> tuple[int, str]:
       on stderr would otherwise interleave incoherently).
     - Lines are written to ``sys.stdout`` as they arrive — the operator
       sees device-code prompts and CLI progress in real time.
+    - When ``stdin_input`` is provided, the subprocess gets a piped stdin
+      pre-fed with that string (then closed). Slice 18w added this so
+      ``cleanup`` can answer the GA CLI's "Continue with X cleanup?
+      (y/N):" prompts that ``-y`` on the parent doesn't actually
+      suppress for subcommands. Default is ``stdin=None`` (inherit
+      parent stdin), which preserves the device-code-prompt behaviour
+      slice 18j relied on for ``setup`` flows.
     - The captured copy is returned for AADSTS detection in :meth:`run`.
 
     Tests patch this helper directly rather than reaching into Popen.
     """
     proc = subprocess.Popen(
         argv,
+        stdin=subprocess.PIPE if stdin_input is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
     )
+    if stdin_input is not None:
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(stdin_input)
+        finally:
+            proc.stdin.close()
     assert proc.stdout is not None  # for type checkers; guaranteed by stdout=PIPE
     buf: list[str] = []
     deadline = time.monotonic() + timeout

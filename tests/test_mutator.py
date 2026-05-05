@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +15,7 @@ from mutator import (
     CliInvocationError,
     Mutator,
     RunResult,
+    _run_streaming,
     get_mutator,
 )
 
@@ -113,6 +115,46 @@ class TestAADSTSExtraction:
         assert excinfo.value.returncode == 7
         assert "weird crash" in excinfo.value.output
 
+    def test_stdin_input_threads_through_to_run_streaming(self) -> None:
+        """Slice 18w: cleanup needs to feed `y\\n` to the subprocess.
+
+        The kwarg must reach `_run_streaming` unchanged.
+        """
+        m = A365CliMutator()
+        m.available = True
+        with patch("mutator._run_streaming") as runner:
+            runner.return_value = (0, "")
+            m.run(["a365", "cleanup", "azure", "--agent-name", "x"], stdin_input="y\n")
+        assert runner.call_args.kwargs["stdin_input"] == "y\n"
+
+
+# ---------------------------------------------------------------------------
+# _run_streaming smoke (real subprocess)
+# ---------------------------------------------------------------------------
+
+
+class TestRunStreamingStdin:
+    """Slice 18w real-subprocess smoke for the new stdin pipe."""
+
+    def test_stdin_input_reaches_subprocess(self) -> None:
+        rc, out = _run_streaming(
+            [sys.executable, "-c", "print(input().strip().upper())"],
+            timeout=10.0,
+            stdin_input="hello\n",
+        )
+        assert rc == 0
+        assert "HELLO" in out
+
+    def test_no_stdin_input_means_inherited_stdin(self) -> None:
+        # The default path — stdin not connected to a pipe — must keep
+        # working for `setup` flows that emit device-code prompts.
+        rc, out = _run_streaming(
+            [sys.executable, "-c", "print('no stdin needed')"],
+            timeout=5.0,
+        )
+        assert rc == 0
+        assert "no stdin needed" in out
+
 
 # ---------------------------------------------------------------------------
 # Mutator protocol
@@ -127,7 +169,13 @@ class _FakeMutator:
         self.calls: list[list[str]] = []
         self.scripted: list[RunResult | Exception] = []
 
-    def run(self, argv: list[str], *, timeout: float = 60.0) -> RunResult:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: float = 60.0,
+        stdin_input: str | None = None,
+    ) -> RunResult:
         self.calls.append(list(argv))
         if self.scripted:
             nxt = self.scripted.pop(0)

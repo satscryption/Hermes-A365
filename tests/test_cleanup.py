@@ -27,10 +27,21 @@ from mutator import AADSTSError, CliInvocationError, RunResult
 class FakeMutator:
     available: bool = True
     calls: list[list[str]] = field(default_factory=list)
+    # Slice 18w: record stdin_input per call so cleanup tests can assert
+    # we're feeding `y\n` to answer the GA CLI's "Continue with X
+    # cleanup? (y/N):" prompt that `-y` doesn't suppress.
+    stdin_inputs: list[str | None] = field(default_factory=list)
     scripted: list[RunResult | Exception] = field(default_factory=list)
 
-    def run(self, argv: list[str], *, timeout: float = 60.0) -> RunResult:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: float = 60.0,
+        stdin_input: str | None = None,
+    ) -> RunResult:
         self.calls.append(list(argv))
+        self.stdin_inputs.append(stdin_input)
         if self.scripted:
             nxt = self.scripted.pop(0)
             if isinstance(nxt, Exception):
@@ -254,6 +265,12 @@ class TestApplyCleanup:
         # Mutator received argv lists matching plan order.
         # Index 3 = subcommand (after `a365 cleanup -y`).
         assert [argv[3] for argv in mutator.calls] == ["azure", "instance", "blueprint"]
+        # Slice 18w (bug #11 round-2): each step must be fed `y\n` so
+        # the GA CLI's "Continue with X cleanup? (y/N):" prompt gets
+        # answered. `-y` on the parent verb does NOT propagate to
+        # subcommands — empirically verified during the 2026-05-05
+        # round-2 walkthrough.
+        assert mutator.stdin_inputs == ["y\n", "y\n", "y\n"]
         # Local .env was removed; agent dir reaped.
         assert not (tmp_path / "agents" / "inbox-helper" / ".env").exists()
         assert not (tmp_path / "agents" / "inbox-helper").exists()

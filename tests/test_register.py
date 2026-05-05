@@ -40,7 +40,13 @@ class FakeMutator:
     calls: list[list[str]] = field(default_factory=list)
     scripted: list[RunResult | Exception] = field(default_factory=list)
 
-    def run(self, argv: list[str], *, timeout: float = 60.0) -> RunResult:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: float = 60.0,
+        stdin_input: str | None = None,
+    ) -> RunResult:
         self.calls.append(list(argv))
         if self.scripted:
             nxt = self.scripted.pop(0)

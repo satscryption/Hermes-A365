@@ -221,6 +221,32 @@ class TestClassifyScopes:
         _, detail = _classify_scopes_output(text)
         assert detail == "Mail.Send: pending review"
 
+    def test_real_ga_blueprint_scopes_output_classifies_ok(self) -> None:
+        """Slice 18v regression — pinned against verified GA v1.1.171 output
+        from the 2026-05-05 round-2 walkthrough. The real CLI doesn't
+        print "consented" or "granted"; it prints "Successfully retrieved
+        inheritable permissions from Graph API" then `Inheritable Scopes:`
+        sections. Slice 18q's hint-list tightening (dropping "ok") had
+        regressed the classifier into reporting these as warn."""
+        text = (
+            "Querying Entra ID for agent blueprint inheritable permissions...\n"
+            "Loaded resource IDs from /tmp/a365.generated.config.json\n"
+            "Agent Blueprint ID: 8b563a20-2fac-4210-8210-df139c61e8b7\n"
+            "\n"
+            "Querying Microsoft Graph API for blueprint inheritable permissions...\n"
+            "Successfully retrieved inheritable permissions from Graph API\n"
+            "Blueprint Inheritable Permissions:\n"
+            "==================================\n"
+            "Resource: Microsoft Graph (00000003-0000-0000-c000-000000000000)\n"
+            "  Scope Kind: enumerated\n"
+            "  Inheritable Scopes:\n"
+            "      Mail.ReadWrite\n"
+            "      Mail.Send\n"
+            "Total resources with inheritable permissions: 1\n"
+        )
+        state, _ = _classify_scopes_output(text)
+        assert state == "ok"
+
 
 # ---------------------------------------------------------------------------
 # gather_blueprint_scopes / gather_instance_scopes
