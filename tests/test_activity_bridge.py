@@ -24,6 +24,7 @@ import jwt as _jwt
 import pytest
 from activity_bridge import (
     APX_PRODUCTION_SCOPE,
+    DEFAULT_TRUSTED_SERVICE_URL_HOST_SUFFIXES,
     FMI_TOKEN_SCOPE,
     GRAPH_RESOURCE,
     OBSERVABILITY_RESOURCE_APPID,
@@ -37,6 +38,7 @@ from activity_bridge import (
     _agentic_ids_from_activity,
     _FmiCache,
     _IdempotencyCache,
+    _is_trusted_service_url,
     _JwksCache,
     _UserTokenCache,
     acquire_outbound_token,
@@ -1419,6 +1421,82 @@ class TestServeAppDedupe:
         # Both ack — neither short-circuits as a duplicate.
         assert r1.json()["status"] == "acked"
         assert r2.json()["status"] == "acked"
+
+
+# ---------------------------------------------------------------------------
+# Slice 19j — serviceUrl host suffix allowlist
+# ---------------------------------------------------------------------------
+
+
+class TestIsTrustedServiceUrl:
+    def test_real_teams_service_url_accepted(self) -> None:
+        # The exact shape captured during the round-3 walkthrough.
+        url = "https://smba.trafficmanager.net/amer/2699fca3.../"
+        assert _is_trusted_service_url(url, DEFAULT_TRUSTED_SERVICE_URL_HOST_SUFFIXES)
+
+    def test_arbitrary_host_rejected(self) -> None:
+        assert not _is_trusted_service_url(
+            "https://attacker.example/", DEFAULT_TRUSTED_SERVICE_URL_HOST_SUFFIXES
+        )
+
+    def test_http_rejected_even_on_trusted_host(self) -> None:
+        # Plain HTTP must never be accepted — bearer would ride
+        # unencrypted.
+        assert not _is_trusted_service_url(
+            "http://smba.trafficmanager.net/teams/",
+            DEFAULT_TRUSTED_SERVICE_URL_HOST_SUFFIXES,
+        )
+
+    def test_empty_url_rejected(self) -> None:
+        assert not _is_trusted_service_url("", DEFAULT_TRUSTED_SERVICE_URL_HOST_SUFFIXES)
+
+    def test_empty_suffix_list_rejected(self) -> None:
+        assert not _is_trusted_service_url(
+            "https://smba.trafficmanager.net/teams/", ()
+        )
+
+    def test_suffix_match_is_dns_boundary_not_substring(self) -> None:
+        # `evil-trafficmanager.net` must not slip through a naive
+        # endswith on `trafficmanager.net`. The `.` prefix on each
+        # suffix is the load-bearing detail.
+        assert not _is_trusted_service_url(
+            "https://evil-trafficmanager.net/", (".trafficmanager.net",)
+        )
+
+
+class TestServeAppServiceUrlGate:
+    def test_untrusted_service_url_returns_403(self) -> None:
+        cfg = _cfg()
+        cfg.skip_jwt_validation = True
+        a = {**_inbound_message_activity(), "serviceUrl": "https://attacker.example/"}
+        capture: dict[str, Any] = {"webhook": [], "reply": [], "token": []}
+        with _client_for(cfg, capture=capture) as client:
+            r = client.post("/api/messages", json=a)
+        assert r.status_code == 403
+        assert "untrusted serviceUrl" in r.json()["detail"]
+        # Webhook never fired — the gate sits before any forwarding.
+        assert capture["webhook"] == []
+
+    def test_empty_suffix_list_returns_403_config_bug(self) -> None:
+        cfg = _cfg()
+        cfg.skip_jwt_validation = True
+        cfg.trusted_service_url_suffixes = ()
+        capture: dict[str, Any] = {"webhook": [], "reply": [], "token": []}
+        with _client_for(cfg, capture=capture) as client:
+            r = client.post("/api/messages", json=_inbound_message_activity())
+        assert r.status_code == 403
+        assert "config bug" in r.json()["detail"]
+
+    def test_trusted_service_url_proceeds_normally(self) -> None:
+        cfg = _cfg()
+        cfg.skip_jwt_validation = True
+        capture: dict[str, Any] = {"webhook": [], "reply": [], "token": []}
+        with _client_for(
+            cfg, capture=capture, webhook_response={"text": "echo"}
+        ) as client:
+            r = client.post("/api/messages", json=_inbound_message_activity())
+        assert r.status_code == 200
+        assert r.json()["status"] == "replied"
 
 
 # ---------------------------------------------------------------------------

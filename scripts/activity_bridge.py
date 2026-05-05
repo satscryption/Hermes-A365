@@ -759,6 +759,25 @@ JWKS_CACHE_TTL_SECONDS = 24 * 3600
 # the wild. Configurable via ``BridgeConfig.idempotency_ttl_seconds``.
 DEFAULT_IDEMPOTENCY_TTL_SECONDS = 3600.0
 
+# Slice 19j: only POST outbound replies to ``serviceUrl`` hosts whose
+# DNS suffix is on this list. The bridge mints a user-FIC bearer for
+# the Messaging Bot API SP and ships it to whatever URL the inbound
+# activity carries; without an allowlist a forged activity could
+# steer that bearer's traffic anywhere. Suffix list adapted from
+# NousResearch/hermes-agent#10037's ``TRUSTED_SERVICE_URL_HOST_SUFFIXES``;
+# the round-3 walkthrough confirmed real Teams traffic lands on
+# ``smba.trafficmanager.net`` so ``.trafficmanager.net`` is the
+# load-bearing entry. ``.cloud.microsoft`` and ``.botframework.com``
+# are kept for cross-channel coverage; ``.azure.com`` covers Bot
+# Service-hosted endpoints.
+DEFAULT_TRUSTED_SERVICE_URL_HOST_SUFFIXES: tuple[str, ...] = (
+    ".trafficmanager.net",
+    ".botframework.com",
+    ".botframework.us",
+    ".cloud.microsoft",
+    ".azure.com",
+)
+
 # Refresh outbound token 5 min before expiry to avoid mid-flight 401s.
 TOKEN_REFRESH_SKEW_SECONDS = 300
 
@@ -802,6 +821,10 @@ class BridgeConfig:
     inbound_azp_allowlist: tuple[str, ...] = DEFAULT_INBOUND_AZP_ALLOWLIST
     # Slice 19i: TTL for in-memory dedupe of inbound activities.
     idempotency_ttl_seconds: float = DEFAULT_IDEMPOTENCY_TTL_SECONDS
+    # Slice 19j: DNS suffixes acceptable on the inbound `serviceUrl`.
+    trusted_service_url_suffixes: tuple[str, ...] = (
+        DEFAULT_TRUSTED_SERVICE_URL_HOST_SUFFIXES
+    )
 
 
 def load_bridge_config(
@@ -924,6 +947,31 @@ def _activity_delivery_id(activity: dict[str, Any]) -> str | None:
     if not conv or not activity_id:
         return None
     return f"{conv}:{activity_id}"
+
+
+def _is_trusted_service_url(url: str, suffixes: tuple[str, ...]) -> bool:
+    """Slice 19j: True iff ``url`` is https + hostname ends with one of
+    the configured DNS suffixes.
+
+    Empty or missing URL → False (caller dispatches the 4xx). Empty
+    ``suffixes`` is a config bug; caller checks for it separately so
+    the failure mode is explicit ("refusing to ship outbound" rather
+    than "silently accepted").
+    """
+    if not url or not suffixes:
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        return False
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        return False
+    for suffix in suffixes:
+        if not suffix:
+            continue
+        if hostname.endswith(suffix.lower()):
+            return True
+    return False
 
 
 async def _fetch_aad_v2_keys(client: Any, *, tenant_id: str) -> dict[str, Any]:
@@ -1461,6 +1509,26 @@ def make_app(
         activity: dict[str, Any] = _Body(...),  # noqa: B008 — FastAPI idiom
         authorization: str | None = _Header(default=None),
     ) -> Any:
+        # Slice 19j: refuse to act on an activity whose `serviceUrl`
+        # isn't on the trusted-host suffix allowlist. Without this a
+        # forged activity could redirect our outbound user-FIC bearer
+        # to an attacker-controlled URL. Empty allowlist is a config
+        # bug — refuse all rather than silently accept.
+        service_url = activity.get("serviceUrl") or ""
+        if not cfg.trusted_service_url_suffixes:
+            raise _HTTPException(
+                status_code=403,
+                detail=(
+                    "trusted_service_url_suffixes is empty — refusing to "
+                    "process inbound activity. This is a config bug."
+                ),
+            )
+        if not _is_trusted_service_url(service_url, cfg.trusted_service_url_suffixes):
+            raise _HTTPException(
+                status_code=403,
+                detail=f"untrusted serviceUrl: {service_url!r}",
+            )
+
         # JWT validation — the inbound `Authorization: Bearer <token>` header.
         # Slice 19f: AAD-v2 issuer + JWKS for the bridge's tenant; azp
         # allowlist replaces the BF-specific serviceUrl claim check.
