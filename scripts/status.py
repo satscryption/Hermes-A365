@@ -46,7 +46,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from _common import parse_env, safe_run
+from _common import parse_env, safe_run, slugify
 
 ComponentState = Literal["ok", "warn", "error", "missing", "skipped"]
 OverallState = Literal["ok", "partial", "broken", "uninitialized"]
@@ -217,12 +217,30 @@ def gather_local_config(hermes_home: Path, agent_name: str | None) -> StatusComp
     ]
 
     if agent_name:
-        agent_env_file = hermes_home / "agents" / agent_name / ".env"
-        if not agent_env_file.exists():
+        # The positional ``agent_name`` may be either a CLI display name
+        # ("Hermes Inbox Helper") or a slug ("inbox-helper"). Try the raw
+        # value first (operators who already know the slug), then fall back
+        # to slugify(). Closes 2026-05-05 walkthrough bug #12.
+        candidates = [agent_name]
+        derived = slugify(agent_name)
+        if derived and derived != agent_name:
+            candidates.append(derived)
+
+        agent_env_file: Path | None = None
+        for candidate in candidates:
+            probe = hermes_home / "agents" / candidate / ".env"
+            if probe.exists():
+                agent_env_file = probe
+                break
+
+        if agent_env_file is None:
+            tried = " or ".join(
+                str(hermes_home / "agents" / c / ".env") for c in candidates
+            )
             return StatusComponent(
                 "local_config",
                 _WARN,
-                f"agent .env missing: {agent_env_file}",
+                f"agent .env missing: tried {tried}",
                 data,
             )
         try:
@@ -235,8 +253,11 @@ def gather_local_config(hermes_home: Path, agent_name: str | None) -> StatusComp
                 data,
             )
         data["agent_env"] = agent_env
+        data["agent_dir"] = str(agent_env_file.parent)
         data["aa_instance_id"] = agent_env.get("AA_INSTANCE_ID")
-        detail_parts.append(f"agent={agent_name} ({len(agent_env)} keys)")
+        detail_parts.append(
+            f"agent={agent_env_file.parent.name} ({len(agent_env)} keys)"
+        )
 
     return StatusComponent("local_config", _OK, " | ".join(detail_parts), data)
 

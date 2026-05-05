@@ -78,6 +78,17 @@ class TestCleanupInputs:
         with pytest.raises(ValueError, match="unknown cleanup kind"):
             CleanupInputs(agent_name="x", kinds=("bogus",))  # type: ignore[arg-type]
 
+    def test_resolved_slug_defaults_to_slugified_agent_name(self) -> None:
+        # Slice 18l (bug #12): closes the gap between CLI display name and
+        # local-dir slug.
+        assert CleanupInputs(agent_name="Hermes Inbox Helper").resolved_slug == (
+            "hermes-inbox-helper"
+        )
+
+    def test_resolved_slug_explicit_override_wins(self) -> None:
+        inp = CleanupInputs(agent_name="Hermes Inbox Helper", slug="custom-slug")
+        assert inp.resolved_slug == "custom-slug"
+
 
 # ---------------------------------------------------------------------------
 # _parse_kinds
@@ -137,13 +148,15 @@ class TestBuildCleanupPlan:
 
     def test_argv_shape_minimal(self, tmp_path: Path) -> None:
         plan = build_cleanup_plan(CleanupInputs(agent_name="x"), hermes_home=tmp_path)
+        # Slice 18l (bug #11): -y is a parent flag — `a365 cleanup -y <kind>`,
+        # not `a365 cleanup <kind> --yes`.
         assert plan.steps[0].argv == [
             "a365",
             "cleanup",
+            "-y",
             "azure",
             "--agent-name",
             "x",
-            "--yes",
         ]
 
     def test_argv_shape_with_tenant(self, tmp_path: Path) -> None:
@@ -154,10 +167,10 @@ class TestBuildCleanupPlan:
         assert plan.steps[0].argv == [
             "a365",
             "cleanup",
+            "-y",
             "azure",
             "--agent-name",
             "x",
-            "--yes",
             "--tenant-id",
             "contoso.onmicrosoft.com",
         ]
@@ -172,6 +185,26 @@ class TestBuildCleanupPlan:
     def test_no_local_paths_when_agent_dir_missing(self, tmp_path: Path) -> None:
         plan = build_cleanup_plan(CleanupInputs(agent_name="ghost"), hermes_home=tmp_path)
         assert plan.local_paths == []
+
+    def test_local_paths_resolved_via_slugify_from_display_name(self, tmp_path: Path) -> None:
+        # Bug #12 regression: passing a CLI display name (with spaces) used
+        # to make local lookup miss the actual slugged dir.
+        _seed_agent_dir(tmp_path, agent_name="hermes-inbox-helper")
+        plan = build_cleanup_plan(
+            CleanupInputs(agent_name="Hermes Inbox Helper"),
+            hermes_home=tmp_path,
+        )
+        names = [p.name for p in plan.local_paths]
+        assert ".env" in names
+
+    def test_local_paths_use_explicit_slug_override(self, tmp_path: Path) -> None:
+        _seed_agent_dir(tmp_path, agent_name="custom-slug")
+        plan = build_cleanup_plan(
+            CleanupInputs(agent_name="Whatever Display", slug="custom-slug"),
+            hermes_home=tmp_path,
+        )
+        names = [p.name for p in plan.local_paths]
+        assert ".env" in names
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +221,7 @@ class TestPlanRender:
         assert "azure" in text
         assert "instance" in text
         assert "blueprint" in text
-        assert "$ a365 cleanup azure" in text
+        assert "$ a365 cleanup -y azure" in text
         assert ".env" in text
 
     def test_human_says_none_when_no_local_files(self, tmp_path: Path) -> None:
@@ -211,7 +244,8 @@ class TestApplyCleanup:
         assert isinstance(result, CleanupResult)
         assert result.completed == ["azure", "instance", "blueprint"]
         # Mutator received argv lists matching plan order.
-        assert [argv[2] for argv in mutator.calls] == ["azure", "instance", "blueprint"]
+        # Index 3 = subcommand (after `a365 cleanup -y`).
+        assert [argv[3] for argv in mutator.calls] == ["azure", "instance", "blueprint"]
         # Local .env was removed; agent dir reaped.
         assert not (tmp_path / "agents" / "inbox-helper" / ".env").exists()
         assert not (tmp_path / "agents" / "inbox-helper").exists()
@@ -225,7 +259,7 @@ class TestApplyCleanup:
         mutator = FakeMutator()
         result = apply_cleanup_plan(plan, mutator=mutator, hermes_home=tmp_path)
         assert result.completed == ["blueprint"]
-        assert [argv[2] for argv in mutator.calls] == ["blueprint"]
+        assert [argv[3] for argv in mutator.calls] == ["blueprint"]
 
     def test_aadsts_error_propagates_and_local_files_remain(self, tmp_path: Path) -> None:
         _seed_agent_dir(tmp_path)

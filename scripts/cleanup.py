@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from _common import slugify
 from mutator import AADSTSError, CliInvocationError, Mutator, get_mutator
 
 CleanupKind = Literal["azure", "instance", "blueprint"]
@@ -87,6 +88,7 @@ class CleanupInputs:
     agent_name: str
     tenant_id: str | None = None
     kinds: tuple[CleanupKind, ...] = CLEANUP_KINDS  # default: all three
+    slug: str | None = None  # local-dir slug; defaults to slugify(agent_name)
 
     def __post_init__(self) -> None:
         if not self.agent_name:
@@ -94,6 +96,19 @@ class CleanupInputs:
         for k in self.kinds:
             if k not in CLEANUP_KINDS:
                 raise ValueError(f"unknown cleanup kind: {k!r}; allowed: {list(CLEANUP_KINDS)}")
+
+    @property
+    def resolved_slug(self) -> str:
+        """Slug used for ``~/.hermes/agents/<slug>/`` lookup.
+
+        Operator override (``--slug``) wins; otherwise we slugify the
+        ``agent_name``. This is the fix for the 2026-05-05 walkthrough's
+        bug #12 — the wrapper used to look at
+        ``~/.hermes/agents/Hermes Inbox Helper/`` literally.
+        """
+        if self.slug:
+            return self.slug
+        return slugify(self.agent_name)
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +135,7 @@ class CleanupPlan:
             lines.append(f"  tenant: {self.inputs.tenant_id}")
         else:
             lines.append("  tenant: (auto-detect from `az account show`)")
+        lines.append(f"  local slug: {self.inputs.resolved_slug}")
         lines.append("  cloud steps (in order):")
         if not self.steps:
             lines.append("    (none)")
@@ -144,7 +160,11 @@ _DESCRIPTIONS: dict[CleanupKind, str] = {
 
 
 def _step_argv(kind: CleanupKind, inputs: CleanupInputs) -> list[str]:
-    argv = ["a365", "cleanup", kind, "--agent-name", inputs.agent_name, "--yes"]
+    # `-y` is a parent-only flag in the GA CLI (`a365 cleanup -y`), not
+    # accepted on the subcommand. The 2026-05-05 walkthrough caught
+    # the wrong placement (bug #11): `a365 cleanup azure --yes` errors
+    # immediately with "Unrecognized command or argument '--yes'".
+    argv = ["a365", "cleanup", "-y", kind, "--agent-name", inputs.agent_name]
     if inputs.tenant_id:
         argv.extend(["--tenant-id", inputs.tenant_id])
     return argv
@@ -179,7 +199,7 @@ def build_cleanup_plan(
     return CleanupPlan(
         inputs=inputs,
         steps=steps,
-        local_paths=_local_artefacts(hermes_home, inputs.agent_name),
+        local_paths=_local_artefacts(hermes_home, inputs.resolved_slug),
     )
 
 
@@ -223,7 +243,7 @@ def apply_cleanup_plan(
         result.messages.append(f"[apply] removed {path}")
 
     # Best-effort agent dir reaper.
-    agent_dir = _agent_dir(hermes_home, plan.inputs.agent_name)
+    agent_dir = _agent_dir(hermes_home, plan.inputs.resolved_slug)
     if agent_dir.exists() and not any(agent_dir.iterdir()):
         agent_dir.rmdir()
         result.messages.append(f"[apply] removed empty dir {agent_dir}")
@@ -277,6 +297,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--slug",
+        help=(
+            "local slug under ~/.hermes/agents/<slug>/; "
+            "defaults to slugify(--agent-name) — pass explicitly if you used a "
+            "custom slug at `instance create` time"
+        ),
+    )
+    parser.add_argument(
         "--confirm",
         help="must equal --agent-name for the apply path to proceed",
     )
@@ -285,7 +313,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         kinds = _parse_kinds(args.kinds)
-        inputs = CleanupInputs(agent_name=args.agent_name, tenant_id=args.tenant_id, kinds=kinds)
+        inputs = CleanupInputs(
+            agent_name=args.agent_name,
+            tenant_id=args.tenant_id,
+            kinds=kinds,
+            slug=args.slug,
+        )
     except (ValueError, CleanupError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2

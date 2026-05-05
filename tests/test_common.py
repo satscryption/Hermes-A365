@@ -3,6 +3,8 @@
 Coverage focus:
 - ``deep_diff`` — used by reconcilers, so its semantics matter.
 - ``render_diff_human`` — readability.
+- ``slugify`` — used by cleanup + status to map a CLI display name onto
+  the local ``~/.hermes/agents/<slug>/`` dir.
 
 The other helpers (``safe_run``, ``tcp_reachable``, ``parse_env``) are
 exercised through the doctor tests (``tests/test_doctor.py``).
@@ -10,7 +12,32 @@ exercised through the doctor tests (``tests/test_doctor.py``).
 
 from __future__ import annotations
 
-from _common import deep_diff, render_diff_human
+import pytest
+from _common import deep_diff, render_diff_human, slugify
+
+
+class TestSlugify:
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("Hermes Inbox Helper", "hermes-inbox-helper"),
+            ("inbox-helper", "inbox-helper"),
+            ("INBOX HELPER", "inbox-helper"),
+            ("Foo_Bar 99", "foo-bar-99"),
+            ("Multi   Spaces", "multi-spaces"),
+            ("Trailing space ", "trailing-space"),
+            (" Leading space", "leading-space"),
+            ("Already-Slug", "already-slug"),
+            ("Mixed/Punct.&Symbols", "mixed-punct-symbols"),
+        ],
+    )
+    def test_canonicalises(self, name: str, expected: str) -> None:
+        assert slugify(name) == expected
+
+    def test_empty_for_pure_punct(self) -> None:
+        # Caller is responsible for rejecting empty slugs.
+        assert slugify("---") == ""
+        assert slugify("   ") == ""
 
 
 class TestDeepDiff:

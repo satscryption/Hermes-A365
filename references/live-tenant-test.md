@@ -341,13 +341,15 @@ echo "exit=$?"
 overall report returns `partial` / exit 1 because `activity_bridge:
 missing` (expected until the bridge ships).
 
-⚠️ Two wrapper bugs noted (queued for slice 18j):
-- Pass the **slug** (`<slug>`) not the display name. The wrapper
-  doesn't slugify, so `status "Hermes Inbox Helper"` looks for
-  `~/.hermes/agents/Hermes Inbox Helper/.env` — wrong.
-- The `blueprint_scopes` `detail` field shows the CLI's progress
-  message ("Querying Entra ID for…") rather than the result. State
-  is correct; only the human-readable detail is misleading.
+⚠️ The `blueprint_scopes` `detail` field still shows the CLI's
+progress message ("Querying Entra ID for…") rather than the result —
+state is correct; only the human-readable detail is misleading
+(bug #13, queued).
+
+You can now pass either the slug (`inbox-helper`) or the display name
+(`"Hermes Inbox Helper"`) — slice 18l made `gather_local_config`
+fall back to `slugify(agent_name)` if the literal-name dir doesn't
+exist.
 
 - [ ] `local_config: ok`
 - [ ] `blueprint_scopes: ok`
@@ -355,29 +357,34 @@ missing` (expected until the bridge ships).
 
 ## 10. cleanup — leave the tenant clean
 
-⚠️ **The wrapper composes `--yes` on each subcommand**, but the GA CLI
-only accepts `-y` / `--yes` on the **parent** `cleanup` verb — not on
-`cleanup azure` / `instance` / `blueprint`. Running the wrapper with
-`--apply` will fail at the first cloud step. Queued for slice 18j.
+Slice 18l fixed the argv composition (bug #11) and the local-dir
+slug resolution (bug #12), so the wrapper apply path now works
+end-to-end.
 
-Dry-run via the wrapper to review the plan:
+Dry-run first to review the plan and verify the resolved local slug:
 
 ```bash
-uv run python scripts/cleanup.py --agent-name "<display-name>"
+uv run python scripts/cleanup.py --agent-name "<display-name>" --tenant-id <tenant-id>
 ```
 
-Then apply via the parent CLI verb (cleans azure + instance +
-blueprint in one shot):
+The plan output prints `local slug: <slug>` and renders each step as
+`a365 cleanup -y <kind> --agent-name "<display-name>"` — confirm the
+slug matches the directory you used at `instance create` time. If
+they diverge, pass `--slug <your-slug>` to override.
+
+Apply:
 
 ```bash
-a365 cleanup -y --agent-name "<display-name>" --tenant-id <tenant-id>
+uv run python scripts/cleanup.py --agent-name "<display-name>" \
+    --tenant-id <tenant-id> --apply --confirm "<display-name>"
 ```
 
 The CLI deletes the blueprint Entra app + SP, removes the local
 `a365.config.json` and `a365.generated.config.json` (after backing
 both up to `*.backup-<timestamp>.json` in the same directory), and
 emits no errors on absent resources (e.g. no Azure App Service in
-your test setup is fine — it's a no-op).
+your test setup is fine — it's a no-op). The wrapper then removes
+the per-agent local artefacts under `~/.hermes/agents/<slug>/`.
 
 ⚠️ **Backup files contain the secret.** The
 `a365.generated.config.backup-*.json` file the cleanup leaves behind
@@ -385,13 +392,6 @@ holds the same plaintext client secret as the original. Slice 18i
 gitignored both backup patterns; if you've cloned to a fresh checkout,
 double-check `git check-ignore -v a365.generated.config.backup-*.json`
 returns a hit before running `git add`.
-
-You'll also need to remove the per-agent local dir manually (the
-wrapper's name↔slug bug means cleanup didn't):
-
-```bash
-rm -rf ~/.hermes/agents/<slug>
-```
 
 - [ ] `cleanup --apply` exits 0.
 - [ ] Blueprint app + service principal removed from Entra Portal.
@@ -429,8 +429,8 @@ fix; none requires architectural rework except the last.
 | 8 | `consent.py` | ~~Calls `qs.query_consent(app_id=...)`, a method that doesn't exist on the v0.2 `QuerySource` protocol.~~ **Fixed in slice 18k** — polling now uses `query_blueprint_scopes` and shares the `_classify_scopes_output` heuristic with `status.py`. CLI takes a positional `agent_name` (omittable when `--print-url-only`). |
 | 9 | `instance_create.py` | Writes a leftover `A365_CLI_VARIANT` key (v0.1 artefact). |
 | 10 | `instance_create.py` | Dry-run renders a fresh `AA_INSTANCE_ID` that `--apply` discards in favour of its own. Surprising. |
-| 11 | `cleanup.py` wrapper | Composes `--yes` on each subcommand; the GA CLI only accepts `-y` on the parent `cleanup` verb. Apply path errors immediately. |
-| 12 | `cleanup.py` / `status.py` | Both look up local files using the literal `--agent-name` (e.g. `Hermes Inbox Helper`) rather than the slug (`inbox-helper`). Local cleanup misses the dir; status misses the .env. |
+| 11 | `cleanup.py` wrapper | ~~Composes `--yes` on each subcommand; the GA CLI only accepts `-y` on the parent `cleanup` verb.~~ **Fixed in slice 18l** — argv now `a365 cleanup -y <kind> --agent-name X`. |
+| 12 | `cleanup.py` / `status.py` | ~~Both look up local files using the literal `--agent-name` rather than the slug.~~ **Fixed in slice 18l** — `_common.slugify` derives the slug from the display name; `cleanup.py` adds a `--slug` override; `status.py` falls back to `slugify(agent_name)` if the literal-name dir doesn't exist. |
 | 13 | `status.py` `blueprint_scopes` parser | Reports the CLI's progress message ("Querying Entra ID for…") in the `detail` field instead of the result. State is correct; only the human-readable string is wrong. |
 | 14 | `publish.py` wrapper | Doesn't distinguish blueprint-only vs `--aiteammate` flow. The blueprint-only `a365 publish` does a Graph `POST` (no zip); only AI Teammate produces a zip. |
 | 15 | SKILL.md / runbook | Claim "T2 client secret lives only in the keychain". On macOS / Linux DPAPI isn't available, so the CLI writes the secret in plaintext to `a365.generated.config.json`. The runbook now reflects this; SKILL.md should too. |

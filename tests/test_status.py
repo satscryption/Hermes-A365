@@ -149,6 +149,29 @@ class TestLocalConfig:
         assert result.state == "ok"
         assert "agent=inbox-helper" in result.detail
 
+    def test_ok_at_agent_scope_via_slugified_display_name(self, tmp_path: Path) -> None:
+        # Slice 18l (bug #12): operators tend to type the display name
+        # ("Hermes Inbox Helper") not the slug. Wrapper now slugifies on
+        # lookup before giving up.
+        _seed_skill_env(tmp_path)
+        agent_env = tmp_path / "agents" / "hermes-inbox-helper" / ".env"
+        agent_env.parent.mkdir(parents=True)
+        agent_env.write_text("AA_INSTANCE_ID=550e8400\n")
+        result = gather_local_config(tmp_path, "Hermes Inbox Helper")
+        assert result.state == "ok"
+        assert "agent=hermes-inbox-helper" in result.detail
+
+    def test_warn_message_lists_both_paths_when_agent_dir_missing(
+        self, tmp_path: Path
+    ) -> None:
+        _seed_skill_env(tmp_path)
+        result = gather_local_config(tmp_path, "Hermes Inbox Helper")
+        assert result.state == "warn"
+        # Both the literal-name and the slugified path should appear in the
+        # detail so operators see exactly where we looked.
+        assert "Hermes Inbox Helper" in result.detail
+        assert "hermes-inbox-helper" in result.detail
+
 
 # ---------------------------------------------------------------------------
 # _classify_scopes_output

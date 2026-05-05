@@ -10,6 +10,7 @@ Path conventions:
 
 from __future__ import annotations
 
+import re
 import socket
 import subprocess
 from pathlib import Path
@@ -55,6 +56,27 @@ def tcp_reachable(host: str, *, port: int = 443, timeout: float = 3.0) -> bool:
             return True
     except OSError:
         return False
+
+
+_SLUG_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def slugify(name: str) -> str:
+    """Convert an agent display name to its canonical local-dir slug.
+
+    Lowercase, runs of any non-alphanumeric character collapse to a
+    single hyphen, leading/trailing hyphens trimmed. Matches the slug
+    convention operators are expected to pass to ``hermes a365 instance
+    create <slug>`` — so cleanup / status can locate the local agent
+    dir without the operator having to repeat the slug manually.
+
+    Examples:
+        ``slugify("Hermes Inbox Helper")`` → ``"hermes-inbox-helper"``
+        ``slugify("Foo_Bar 99")``           → ``"foo-bar-99"``
+        ``slugify("---")``                   → ``""`` (empty — caller
+        should reject)
+    """
+    return _SLUG_NON_ALNUM_RE.sub("-", name.lower()).strip("-")
 
 
 def parse_env(text: str) -> dict[str, str]:
