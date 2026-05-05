@@ -354,6 +354,40 @@ rather than the CLI's "Querying Entra ID for…" progress preamble.
 - [ ] `blueprint_scopes: ok`
 - [ ] `instance_scopes: ok`
 
+## 9b. activity-bridge verify (slice 19a) — runtime config sanity
+
+```bash
+uv run python scripts/activity_bridge.py verify --slug <slug> --human
+echo "exit=$?"
+```
+
+Ships in slice 19a as the diagnostic half of the bridge (the long-
+running `serve` mode lands in 19b once the BF webhook contract is
+documented). Five probes:
+
+- `local_config` — `~/.hermes/agents/<slug>/.env` is parseable and
+  carries the keys the runtime needs (`A365_TENANT_ID`,
+  `A365_APP_ID`, `AA_INSTANCE_ID`).
+- `generated_config` — `a365.generated.config.json` (in cwd) has
+  the blueprint client secret + appId; warns if perms looser than
+  0600 (slice 18i / 18x policy).
+- `token_acquisition` — runs an actual `client_credentials` POST to
+  AAD against the `Agent365Observability` resource (the one S2S
+  role our blueprint definitely has — bug #18 caveat). On
+  AADSTS7000218 (no role on resource) it warns rather than errors:
+  the secret works, just the scope permission is missing — useful
+  diagnostic, not a blocker.
+- `reachability` — TCP probes against
+  `login.microsoftonline.com` + `graph.microsoft.com`.
+- `otlp_endpoint` — DNS lookup on the configured OTLP endpoint.
+
+Exit codes match doctor: 0 = all ok, 1 = at least one warn, 2 = at
+least one error. Run as a CI gate before deploying the bridge daemon
+in 19b.
+
+- [ ] `bridge verify` returns 0 (or 1 with only the documented
+      AADSTS7000218 / OTLP-DNS warnings) against the fresh tenant.
+
 ## 10. cleanup — leave the tenant clean
 
 Slice 18l fixed the argv composition (bug #11) and the local-dir

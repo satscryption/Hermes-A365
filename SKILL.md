@@ -84,10 +84,8 @@ Don't use when:
 
 ## Core procedures
 
-Every state-mutating subcommand defaults to **dry-run**. Pass `--apply`
-to execute. Repeated invocation converges to the same state — the
-underlying `a365` verbs are themselves idempotent and reconcile against
-the live tenant.
+State-mutating subcommands default to **dry-run**; pass `--apply` to
+execute. Repeated invocation converges to the same state.
 
 ### `hermes a365 doctor`
 
@@ -188,28 +186,27 @@ channels, telemetry, FIC. Exit codes: `0` ok, `1` partial, `2` broken,
 
 ### `hermes a365 cleanup --agent-name <name> [--kinds=...] --confirm=<name> --apply`
 
-Destructive teardown. Drives the three real granular subcommands in
-safe → unsafe order:
-
-1. `a365 cleanup azure`     — Azure App Service + App Service Plan
-2. `a365 cleanup instance`  — agent instance identity + user
-3. `a365 cleanup blueprint` — Entra blueprint app + service principal
-
-Tearing the App Service down first stops the runtime before the Entra
-identity is revoked, then the blueprint last. After all cloud steps
-succeed, local artefacts under `~/.hermes/agents/<slug>/` are removed.
-`--kinds` accepts a comma-separated subset (e.g. `--kinds=instance,
-blueprint` to skip Azure when the App Service was provisioned out-of-
-band). `--confirm` must equal `--agent-name`. The plan is always printed
-(even without `--apply`) so the operator can audit before mutating.
+Destructive teardown. Drives `a365 cleanup azure` → `instance` →
+`blueprint` (safe → unsafe — App Service first so the runtime stops
+before the Entra identity is revoked). Local artefacts under
+`~/.hermes/agents/<slug>/` are removed after all cloud steps succeed.
+`--kinds=<subset>` runs only the requested kinds. `--confirm` must
+equal `--agent-name`. The plan is always printed for operator
+audit before any mutation.
 
 ### `hermes a365 activity-bridge`
 
-**Status: TODO**, blocked on SPEC §10 Q1. When unblocked the bridge
-authenticates as the blueprint client, subscribes to BF activities for
-the instance, and routes `message` / `invoke` activities to the local
-Hermes agent + the Adaptive Card builder. See
-[`references/activity-protocol-shapes.md`](references/activity-protocol-shapes.md).
+- `verify --slug <slug>` (slice 19a, **shipped**) — diagnostic that
+  validates the per-agent .env, the blueprint client secret (acquires
+  an OAuth token), Graph/AAD reachability, and OTLP DNS. Exit 0/1/2
+  for ok/warn/error; useful in CI / pre-deploy gates.
+- `serve` (slice 19b, **pending**) — long-running BF webhook adapter,
+  exposed via `cloudflared` / reverse proxy, forwarding activities to
+  an operator-defined `HERMES_BRIDGE_WEBHOOK`. Held back until the BF
+  subscription contract is verified against Microsoft's docs. Eventual
+  routing: `message` / `invoke` activities → operator's responder +
+  Adaptive Card builder. See
+  [`references/activity-protocol-shapes.md`](references/activity-protocol-shapes.md).
 
 ## Conflict resolution
 
