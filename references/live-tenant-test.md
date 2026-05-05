@@ -339,15 +339,12 @@ echo "exit=$?"
 overall report returns `partial` / exit 1 because `activity_bridge:
 missing` (expected until the bridge ships).
 
-⚠️ The `blueprint_scopes` `detail` field still shows the CLI's
-progress message ("Querying Entra ID for…") rather than the result —
-state is correct; only the human-readable detail is misleading
-(bug #13, queued).
-
 You can now pass either the slug (`inbox-helper`) or the display name
 (`"Hermes Inbox Helper"`) — slice 18l made `gather_local_config`
 fall back to `slugify(agent_name)` if the literal-name dir doesn't
-exist.
+exist. Slice 18q sharpened the `_classify_scopes_output` heuristic
+so the `blueprint_scopes` `detail` field surfaces real content
+rather than the CLI's "Querying Entra ID for…" progress preamble.
 
 - [ ] `local_config: ok`
 - [ ] `blueprint_scopes: ok`
@@ -429,7 +426,7 @@ fix; none requires architectural rework except the last.
 | 10 | `instance_create.py` | ~~Dry-run renders a fresh `AA_INSTANCE_ID` that `--apply` discards in favour of its own.~~ **Fixed in slice 18n** — UUID generation moved to apply; dry-run for new agents prints `(generated at apply)` instead of a misleading value. |
 | 11 | `cleanup.py` wrapper | ~~Composes `--yes` on each subcommand; the GA CLI only accepts `-y` on the parent `cleanup` verb.~~ **Fixed in slice 18l** — argv now `a365 cleanup -y <kind> --agent-name X`. |
 | 12 | `cleanup.py` / `status.py` | ~~Both look up local files using the literal `--agent-name` rather than the slug.~~ **Fixed in slice 18l** — `_common.slugify` derives the slug from the display name; `cleanup.py` adds a `--slug` override; `status.py` falls back to `slugify(agent_name)` if the literal-name dir doesn't exist. |
-| 13 | `status.py` `blueprint_scopes` parser | Reports the CLI's progress message ("Querying Entra ID for…") in the `detail` field instead of the result. State is correct; only the human-readable string is wrong. |
+| 13 | `status.py` `blueprint_scopes` parser | ~~Reports the CLI's progress message in the `detail` field.~~ **Fixed in slice 18q** — `_meaningful_line` skips lines ending in `…`/`...` and lines starting with progress verbs (Querying / Checking / Resolving / Authenticating / Loading / `[DEBUG]` / `[INFO]`) before picking the representative line. Also tightened `_CONSENTED_HINTS` (dropped `"ok"`, which substring-matched inside words like `token` / `broken` / `blocked` and made the classifier falsely report scopes as consented). |
 | 14 | `publish.py` wrapper | Doesn't distinguish blueprint-only vs `--aiteammate` flow. The blueprint-only `a365 publish` does a Graph `POST` (no zip); only AI Teammate produces a zip. |
 | 15 | SKILL.md / runbook | Claim "T2 client secret lives only in the keychain". On macOS / Linux DPAPI isn't available, so the CLI writes the secret in plaintext to `a365.generated.config.json`. The runbook now reflects this; SKILL.md should too. |
 | 16 | `references/a365-cli-reference.md:144` | Says `brew install --cask powershell`. The cask was deprecated 2026-05; use the formula `brew install powershell`. |

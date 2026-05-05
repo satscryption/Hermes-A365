@@ -192,6 +192,35 @@ class TestClassifyScopes:
         assert state == "warn"
         assert detail.startswith("Some opaque output")
 
+    def test_progress_messages_skipped_when_picking_detail(self) -> None:
+        """Slice 18q (bug #13): the warn-detail used to latch onto the
+        CLI's progress message ("Querying Entra ID for…"), making the
+        operator think the query had hung. Skip progress lines and pick
+        the first real content."""
+        text = (
+            "Querying Entra ID for agent blueprint inheritable permissions...\n"
+            "Resolving client app by display name 'Agent 365 CLI'...\n"
+            "Mail.ReadWrite: pending review\n"
+        )
+        state, detail = _classify_scopes_output(text)
+        assert state == "warn"
+        assert detail == "Mail.ReadWrite: pending review"
+
+    def test_all_progress_falls_back_to_placeholder(self) -> None:
+        text = "Querying Entra ID...\nLoading scopes...\n"
+        state, detail = _classify_scopes_output(text)
+        assert state == "warn"
+        assert detail == "unclassifiable scope output"
+
+    def test_debug_lines_skipped(self) -> None:
+        text = (
+            "[DEBUG] Initializing MSAL token cache\n"
+            "[INFO] Resolving tenant id...\n"
+            "Mail.Send: pending review\n"
+        )
+        _, detail = _classify_scopes_output(text)
+        assert detail == "Mail.Send: pending review"
+
 
 # ---------------------------------------------------------------------------
 # gather_blueprint_scopes / gather_instance_scopes

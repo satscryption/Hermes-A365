@@ -316,26 +316,65 @@ def _skipped(name: str, *, reason: str = "a365 CLI unavailable") -> StatusCompon
     return StatusComponent(name, _SKIPPED, reason)
 
 
-_CONSENTED_HINTS = ("consented", "granted", "ok")
+_CONSENTED_HINTS = ("consented", "granted")
 _NOT_CONSENTED_HINTS = ("not consented", "missing", "not granted", "consent required")
+# `"ok"` was in _CONSENTED_HINTS until slice 18q; substring-matched
+# inside words like "token", "look", "broken", "blocked", which made the
+# classifier latch onto debug output and report scopes as consented when
+# they weren't. The CLI's actual consented language is "consented" /
+# "granted"; "ok" added no positive signal.
+
+# Lines the CLI emits as progress markers rather than data. The 2026-05-05
+# walkthrough caught the unclassifiable-warn path latching onto
+# "Querying Entra ID for agent blueprint inheritable permissions..." (the
+# first thing the CLI prints) and showing it as the result detail (bug
+# #13). We strip these before picking a representative line.
+_PROGRESS_LINE_PREFIXES = (
+    "querying ",
+    "checking ",
+    "resolving ",
+    "authenticating",
+    "loading ",
+    "[debug]",
+    "[info]",
+)
+
+
+def _meaningful_line(text: str) -> str:
+    """Return the first non-progress, non-blank line of ``text``.
+
+    Used as the fall-through detail when no consent-state hint matches.
+    Skips lines that end with `…`/`...` or start with a present-progressive
+    verb the CLI uses for status messages. Returns ``""`` if everything
+    looks like progress.
+    """
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.endswith("...") or line.endswith("…"):
+            continue
+        if line.lower().startswith(_PROGRESS_LINE_PREFIXES):
+            continue
+        return line
+    return ""
 
 
 def _classify_scopes_output(text: str) -> tuple[ComponentState, str]:
     """Heuristic classifier over the CLI's human-readable scope output.
 
     The exact phrasing isn't pinned in v1.1.171; we look for common
-    consent-state hints. When unclassifiable, default to ``ok`` with the
-    first line as detail — the operator can re-run with ``--verbose``.
+    consent-state hints. When unclassifiable, default to ``warn`` with
+    the first non-progress line as detail — the operator can re-run with
+    ``--verbose`` for full text.
     """
     lower = text.lower()
     if any(hint in lower for hint in _NOT_CONSENTED_HINTS):
         return (_WARN, "scopes present but at least one not consented")
     if any(hint in lower for hint in _CONSENTED_HINTS):
         return (_OK, "scopes consented")
-    # Unclassifiable but the CLI returned something — treat as warn so the
-    # operator notices and can run `--verbose` for detail.
-    first_line = text.strip().splitlines()[0] if text.strip() else ""
-    return (_WARN, first_line[:80] or "unclassifiable scope output")
+    representative = _meaningful_line(text)
+    return (_WARN, representative[:80] or "unclassifiable scope output")
 
 
 def gather_blueprint_scopes(
