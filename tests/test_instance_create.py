@@ -26,7 +26,6 @@ def _seed_skill_env(hermes_home: Path, **overrides: str) -> None:
     base = {
         "A365_APP_ID": "00000000-0000-0000-0000-00000000aaa1",
         "A365_TENANT_ID": "contoso.onmicrosoft.com",
-        "A365_CLI_VARIANT": "a365-dotnet",
         "HERMES_OTLP_ENDPOINT": "https://contoso.otel.agent365.microsoft.com",
     }
     base.update(overrides)
@@ -96,11 +95,14 @@ class TestSkillEnvPreconditions:
 
 
 class TestBuildInstancePlan:
-    def test_generates_uuid_when_absent(self, tmp_path: Path) -> None:
+    def test_defers_uuid_generation_when_absent(self, tmp_path: Path) -> None:
+        # Slice 18n (bug #10): the plan no longer mints a UUID at
+        # build time — apply does. Stops dry-run from showing one
+        # value while a later --apply mints another.
         _seed_skill_env(tmp_path)
         plan = build_instance_plan(_inputs(), hermes_home=tmp_path)
+        assert plan.aa_instance_id is None
         assert plan.aa_instance_id_was_existing is False
-        assert len(plan.aa_instance_id) == 36  # UUID format
 
     def test_preserves_existing_aa_instance_id(self, tmp_path: Path) -> None:
         _seed_skill_env(tmp_path)
@@ -145,15 +147,11 @@ class TestBuildInstancePlan:
         )
         assert plan.desired_env_inputs.business_hours_tz == "UTC"
 
-    def test_cli_variant_inherited(self, tmp_path: Path) -> None:
-        _seed_skill_env(tmp_path, A365_CLI_VARIANT="atk-npm")
+    def test_a365_cli_variant_field_is_gone(self, tmp_path: Path) -> None:
+        # Slice 18n (bug #9): no more A365_CLI_VARIANT in the rendered .env.
+        _seed_skill_env(tmp_path)
         plan = build_instance_plan(_inputs(), hermes_home=tmp_path)
-        assert plan.desired_env_inputs.a365_cli_variant == "atk-npm"
-
-    def test_cli_variant_falls_back_when_unset(self, tmp_path: Path) -> None:
-        _seed_skill_env(tmp_path, A365_CLI_VARIANT="")
-        plan = build_instance_plan(_inputs(), hermes_home=tmp_path)
-        assert plan.desired_env_inputs.a365_cli_variant == "a365-dotnet"
+        assert not hasattr(plan.desired_env_inputs, "a365_cli_variant")
 
 
 # ---------------------------------------------------------------------------
@@ -167,18 +165,20 @@ class TestPlanRender:
         plan = build_instance_plan(_inputs(), hermes_home=tmp_path)
         text = plan.render_human()
         assert "[plan] hermes a365 instance create inbox-helper" in text
-        assert "AA_INSTANCE_ID:" in text
-        assert "(new)" in text
+        # Slice 18n (bug #10): new agent shows the deferred-generation marker
+        # rather than a UUID that --apply would discard.
+        assert "(generated at apply)" in text
         assert "cloud step:    none" in text
 
-    def test_human_marks_existing_id_as_existing(self, tmp_path: Path) -> None:
+    def test_human_marks_existing_id_as_preserved(self, tmp_path: Path) -> None:
         _seed_skill_env(tmp_path)
         agent_env = tmp_path / "agents" / "inbox-helper" / ".env"
         agent_env.parent.mkdir(parents=True)
         agent_env.write_text("AA_INSTANCE_ID=abc-123\n")
         plan = build_instance_plan(_inputs(), hermes_home=tmp_path)
         text = plan.render_human()
-        assert "(existing)" in text
+        assert "abc-123" in text
+        assert "preserved" in text
 
 
 # ---------------------------------------------------------------------------
@@ -211,25 +211,30 @@ class TestApplyInstance:
         assert env_path.exists()
         text = env_path.read_text()
         assert "AGENT_IDENTITY=inbox-helper" in text
-        assert f"AA_INSTANCE_ID={plan.aa_instance_id}" in text
+        # Slice 18n: plan.aa_instance_id is None for new agents — apply
+        # mints the UUID, threads it through the result, and writes it
+        # to the .env. The result's id is the source of truth.
+        assert f"AA_INSTANCE_ID={result.aa_instance_id}" in text
         assert "A365_APP_ID=00000000-0000-0000-0000-00000000aaa1" in text
-        # Secrets policy: never write the T2 client secret to disk.
+        # Secrets policy: never write the blueprint client secret to disk.
         assert "A365_APP_PASSWORD" not in text
+        # Bug #9: no v0.1 leftover field.
+        assert "A365_CLI_VARIANT" not in text
 
     def test_idempotent_re_run_preserves_aa_instance_id(self, tmp_path: Path) -> None:
         _seed_skill_env(tmp_path)
         plan1 = build_instance_plan(_inputs(), hermes_home=tmp_path)
-        first_id = plan1.aa_instance_id
-        apply_instance_plan(plan1)
+        first = apply_instance_plan(plan1)
 
         plan2 = build_instance_plan(_inputs(), hermes_home=tmp_path)
-        assert plan2.aa_instance_id == first_id
+        # Plan now sees the existing UUID and pins it in plan.aa_instance_id.
+        assert plan2.aa_instance_id == first.aa_instance_id
         assert plan2.aa_instance_id_was_existing is True
         apply_instance_plan(plan2)
 
         # AA_INSTANCE_ID stayed put across the round-trip.
         env_text = (tmp_path / "agents" / "inbox-helper" / ".env").read_text()
-        assert f"AA_INSTANCE_ID={first_id}" in env_text
+        assert f"AA_INSTANCE_ID={first.aa_instance_id}" in env_text
 
 
 # ---------------------------------------------------------------------------

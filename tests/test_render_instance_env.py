@@ -35,7 +35,6 @@ def _base_inputs(**overrides: object) -> InstanceEnvInputs:
         owner_aad_id="00000000-0000-0000-0000-000000000001",
         a365_app_id="00000000-0000-0000-0000-00000000aaa1",
         a365_tenant_id="contoso.onmicrosoft.com",
-        a365_cli_variant="a365-dotnet",
         hermes_otlp_endpoint="https://contoso.otel.agent365.microsoft.com",
         aa_instance_id=FIXED_INSTANCE_ID,
     )
@@ -65,11 +64,6 @@ def test_render_instance_env_generates_uuid_when_missing() -> None:
     assert len(inputs.aa_instance_id) == 36  # UUID length
 
 
-def test_render_instance_env_rejects_unknown_cli_variant() -> None:
-    with pytest.raises(ValueError, match="unknown a365_cli_variant"):
-        _base_inputs(a365_cli_variant="bogus")
-
-
 def test_render_instance_env_omits_unset_business_hours() -> None:
     text = render_instance_env(_base_inputs())
     assert "BUSINESS_HOURS_TZ" not in text
@@ -82,3 +76,10 @@ def test_render_instance_env_never_emits_app_password() -> None:
     text = render_instance_env(_base_inputs())
     assert "A365_APP_PASSWORD" not in text
     assert "PASSWORD" not in text
+
+
+def test_render_instance_env_does_not_emit_a365_cli_variant() -> None:
+    """Slice 18n (bug #9): the v0.1 A365_CLI_VARIANT field is gone."""
+    text = render_instance_env(_base_inputs())
+    assert "A365_CLI_VARIANT" not in text
+    assert "VARIANT" not in text

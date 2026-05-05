@@ -24,12 +24,11 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from _common import parse_env
-from render_instance_env import CLI_VARIANTS, InstanceEnvInputs, render_instance_env
+from render_instance_env import InstanceEnvInputs, render_instance_env
 
 _HERMES_HOME_ENV = "HERMES_HOME"
 _HERMES_HOME_DEFAULT = "~/.hermes"
@@ -123,22 +122,36 @@ class InstanceCreateInputs:
 
 @dataclass
 class InstancePlan:
-    """The local file write the apply phase will perform."""
+    """The local file write the apply phase will perform.
+
+    ``aa_instance_id`` is ``None`` when no prior ``AA_INSTANCE_ID`` exists
+    in the agent .env — in that case the apply phase generates a fresh
+    UUID. Plan-time UUID generation was removed in slice 18n (bug #10
+    from the live walkthrough) because the dry-run UUID was discarded
+    by ``--apply``, which then minted its own; operators saw two
+    different IDs for the same operation.
+    """
 
     slug: str
-    aa_instance_id: str
-    aa_instance_id_was_existing: bool
+    aa_instance_id: str | None
     desired_env_inputs: InstanceEnvInputs
     env_path: Path
     will_create: bool  # True if the agent .env doesn't yet exist
 
+    @property
+    def aa_instance_id_was_existing(self) -> bool:
+        return self.aa_instance_id is not None
+
     def render_human(self) -> str:
-        new_or_existing = "existing" if self.aa_instance_id_was_existing else "new"
+        if self.aa_instance_id is None:
+            id_line = "AA_INSTANCE_ID: (generated at apply)"
+        else:
+            id_line = f"AA_INSTANCE_ID: {self.aa_instance_id}  (preserved from existing .env)"
         action = "create" if self.will_create else "update"
         return "\n".join(
             [
                 f"[plan] hermes a365 instance create {self.slug}",
-                f"  AA_INSTANCE_ID: {self.aa_instance_id}  ({new_or_existing})",
+                f"  {id_line}",
                 f"  agent .env:    {self.env_path}  ({action})",
                 "  cloud step:    none — server-side identity is managed by `setup blueprint`",
             ]
@@ -160,20 +173,17 @@ def _resolve_otlp_endpoint(
     )
 
 
-def _resolve_cli_variant(parent_env: dict[str, str]) -> str:
-    """v0.2 only ships the .NET variant; recorded for downstream drift-detection."""
-    variant = parent_env.get("A365_CLI_VARIANT", "").strip()
-    if variant in CLI_VARIANTS:
-        return variant
-    return "a365-dotnet"
-
-
 def build_instance_plan(
     inputs: InstanceCreateInputs,
     *,
     hermes_home: Path | None = None,
 ) -> InstancePlan:
-    """Resolve identifiers, gather inherited values, return the file-write plan."""
+    """Resolve identifiers, gather inherited values, return the file-write plan.
+
+    The ``AA_INSTANCE_ID`` is preserved from any existing agent .env;
+    otherwise the plan defers UUID generation to apply (so dry-run and
+    apply don't disagree). See ``InstancePlan.aa_instance_id``.
+    """
     if hermes_home is None:
         hermes_home = _resolve_hermes_home()
 
@@ -181,8 +191,7 @@ def build_instance_plan(
     existing_agent = _load_existing_agent_env(hermes_home, inputs.slug)
     env_path = _agent_env_path(hermes_home, inputs.slug)
 
-    existing_id = existing_agent.get("AA_INSTANCE_ID", "").strip()
-    aa_instance_id = existing_id or str(uuid.uuid4())
+    existing_id = existing_agent.get("AA_INSTANCE_ID", "").strip() or None
 
     desired_inputs = InstanceEnvInputs(
         agent_identity=inputs.slug,
@@ -190,9 +199,10 @@ def build_instance_plan(
         owner_aad_id=inputs.owner_aad_id,
         a365_app_id=parent_env["A365_APP_ID"],
         a365_tenant_id=parent_env["A365_TENANT_ID"],
-        a365_cli_variant=_resolve_cli_variant(parent_env),
         hermes_otlp_endpoint=_resolve_otlp_endpoint(inputs, parent_env),
-        aa_instance_id=aa_instance_id,
+        # When existing_id is None, InstanceEnvInputs.__post_init__ mints a
+        # fresh UUID — but we won't materialise that until apply time.
+        aa_instance_id=existing_id,
         # Preserve prior business-hours values unless the caller overrode them.
         business_hours_tz=(inputs.business_hours_tz or existing_agent.get("BUSINESS_HOURS_TZ")),
         business_hours_start=(
@@ -203,8 +213,7 @@ def build_instance_plan(
 
     return InstancePlan(
         slug=inputs.slug,
-        aa_instance_id=aa_instance_id,
-        aa_instance_id_was_existing=bool(existing_id),
+        aa_instance_id=existing_id,
         desired_env_inputs=desired_inputs,
         env_path=env_path,
         will_create=not env_path.exists(),
@@ -226,12 +235,20 @@ class InstanceCreateResult:
 
 
 def apply_instance_plan(plan: InstancePlan) -> InstanceCreateResult:
-    """Render the desired .env and atomically write it to the agent dir."""
+    """Render the desired .env and atomically write it to the agent dir.
+
+    Pulls the realised ``AA_INSTANCE_ID`` off ``desired_env_inputs`` —
+    that's where the freshly-minted UUID lives when ``plan.aa_instance_id``
+    is ``None`` (no prior id existed; UUID was generated by
+    ``InstanceEnvInputs.__post_init__``).
+    """
     rendered = render_instance_env(plan.desired_env_inputs)
     write_text_atomic(plan.env_path, rendered)
+    realised_id = plan.desired_env_inputs.aa_instance_id
+    assert realised_id is not None  # __post_init__ guarantees this
     return InstanceCreateResult(
         slug=plan.slug,
-        aa_instance_id=plan.aa_instance_id,
+        aa_instance_id=realised_id,
         env_path=plan.env_path,
         env_written=True,
         messages=[f"[apply] wrote {plan.env_path}"],

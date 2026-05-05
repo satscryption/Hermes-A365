@@ -1,8 +1,10 @@
 """Render the per-agent ``.env`` file for ``hermes a365 instance create``.
 
 Spec: SPEC.md §6.5. The output is the file written to
-``~/.hermes/agents/<slug>/.env``. Note that ``A365_APP_PASSWORD`` is **never**
-written to this file; the activity bridge pulls it from the OS keychain.
+``~/.hermes/agents/<slug>/.env``. Note that the blueprint client secret
+is **never** written to this file; the activity bridge pulls it from
+the OS keychain (or, on macOS / Linux where DPAPI isn't available,
+from ``a365.generated.config.json`` per slice 18i's gitignore).
 
 Programmatic use::
 
@@ -14,7 +16,6 @@ Programmatic use::
         a365_app_id="00000000-0000-0000-0000-00000000aaa1",
         a365_tenant_id="contoso.onmicrosoft.com",
         aa_instance_id="550e8400-e29b-41d4-a716-446655440000",
-        a365_cli_variant="a365-dotnet",
         hermes_otlp_endpoint="https://contoso.otel.agent365.microsoft.com",
     ))
 
@@ -26,7 +27,6 @@ CLI use::
         --owner-aad-id <oid> \\
         --a365-app-id <appId> \\
         --a365-tenant-id contoso.onmicrosoft.com \\
-        --a365-cli-variant a365-dotnet \\
         --hermes-otlp-endpoint <url>
 """
 
@@ -39,8 +39,6 @@ from dataclasses import dataclass
 
 from _common import jinja_env
 
-CLI_VARIANTS: frozenset[str] = frozenset({"atk-npm", "a365-dotnet"})
-
 
 @dataclass
 class InstanceEnvInputs:
@@ -49,7 +47,6 @@ class InstanceEnvInputs:
     owner_aad_id: str
     a365_app_id: str
     a365_tenant_id: str
-    a365_cli_variant: str
     hermes_otlp_endpoint: str
     aa_instance_id: str | None = None  # generated if None
     business_hours_tz: str | None = None
@@ -59,11 +56,6 @@ class InstanceEnvInputs:
     def __post_init__(self) -> None:
         if self.aa_instance_id is None:
             self.aa_instance_id = str(uuid.uuid4())
-        if self.a365_cli_variant not in CLI_VARIANTS:
-            raise ValueError(
-                f"unknown a365_cli_variant: {self.a365_cli_variant!r}. "
-                f"Allowed: {sorted(CLI_VARIANTS)}"
-            )
 
 
 def render_instance_env(inputs: InstanceEnvInputs) -> str:
@@ -77,7 +69,6 @@ def render_instance_env(inputs: InstanceEnvInputs) -> str:
         a365_app_id=inputs.a365_app_id,
         a365_tenant_id=inputs.a365_tenant_id,
         aa_instance_id=inputs.aa_instance_id,
-        a365_cli_variant=inputs.a365_cli_variant,
         hermes_otlp_endpoint=inputs.hermes_otlp_endpoint,
         business_hours_tz=inputs.business_hours_tz,
         business_hours_start=inputs.business_hours_start,
@@ -94,11 +85,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--owner-aad-id", required=True)
     parser.add_argument("--a365-app-id", required=True)
     parser.add_argument("--a365-tenant-id", required=True)
-    parser.add_argument(
-        "--a365-cli-variant",
-        required=True,
-        choices=sorted(CLI_VARIANTS),
-    )
     parser.add_argument("--hermes-otlp-endpoint", required=True)
     parser.add_argument("--aa-instance-id", help="UUID; generated if omitted")
     parser.add_argument("--business-hours-tz")
@@ -112,7 +98,6 @@ def main(argv: list[str] | None = None) -> int:
         owner_aad_id=args.owner_aad_id,
         a365_app_id=args.a365_app_id,
         a365_tenant_id=args.a365_tenant_id,
-        a365_cli_variant=args.a365_cli_variant,
         hermes_otlp_endpoint=args.hermes_otlp_endpoint,
         aa_instance_id=args.aa_instance_id,
         business_hours_tz=args.business_hours_tz,

@@ -253,10 +253,10 @@ This is purely local — no cloud calls. It writes
 re-runs), owner metadata, and inherited `A365_APP_ID` /
 `A365_TENANT_ID` / `HERMES_OTLP_ENDPOINT`.
 
-⚠️ Two minor warts (queued for slice 18j): the file still includes a
-v0.1-leftover `A365_CLI_VARIANT` key, and the dry-run renders a
-fresh `AA_INSTANCE_ID` that gets discarded by `--apply` (which
-generates its own). Neither blocks.
+Slice 18n cleaned up the rendered .env (no v0.1 `A365_CLI_VARIANT`)
+and moved UUID generation to apply-time, so dry-run shows
+`AA_INSTANCE_ID: (generated at apply)` rather than a value `--apply`
+would discard.
 
 - [ ] `~/.hermes/agents/<slug>/.env` exists, parseable, contains
       `AA_INSTANCE_ID`.
@@ -426,8 +426,8 @@ fix; none requires architectural rework except the last.
 | 6 | `license.py` SKU naming | Recommends "Agent 365 add-on" / "E7" — the actual GA SKU is `MICROSOFT_AGENT_365_TIER_3`. Update `references/license-cost-table.md` too. |
 | 7 | `register.py` rendered argv | Multi-word agent names render unquoted (`--agent-name Hermes Inbox Helper`). Fine for the actual subprocess call (passed as list), misleading if a user copy-pastes. |
 | 8 | `consent.py` | ~~Calls `qs.query_consent(app_id=...)`, a method that doesn't exist on the v0.2 `QuerySource` protocol.~~ **Fixed in slice 18k** — polling now uses `query_blueprint_scopes` and shares the `_classify_scopes_output` heuristic with `status.py`. CLI takes a positional `agent_name` (omittable when `--print-url-only`). |
-| 9 | `instance_create.py` | Writes a leftover `A365_CLI_VARIANT` key (v0.1 artefact). |
-| 10 | `instance_create.py` | Dry-run renders a fresh `AA_INSTANCE_ID` that `--apply` discards in favour of its own. Surprising. |
+| 9 | `instance_create.py` | ~~Writes a leftover `A365_CLI_VARIANT` key (v0.1 artefact).~~ **Fixed in slice 18n** — field, template line, validation, CLI flag, and golden files all dropped. |
+| 10 | `instance_create.py` | ~~Dry-run renders a fresh `AA_INSTANCE_ID` that `--apply` discards in favour of its own.~~ **Fixed in slice 18n** — UUID generation moved to apply; dry-run for new agents prints `(generated at apply)` instead of a misleading value. |
 | 11 | `cleanup.py` wrapper | ~~Composes `--yes` on each subcommand; the GA CLI only accepts `-y` on the parent `cleanup` verb.~~ **Fixed in slice 18l** — argv now `a365 cleanup -y <kind> --agent-name X`. |
 | 12 | `cleanup.py` / `status.py` | ~~Both look up local files using the literal `--agent-name` rather than the slug.~~ **Fixed in slice 18l** — `_common.slugify` derives the slug from the display name; `cleanup.py` adds a `--slug` override; `status.py` falls back to `slugify(agent_name)` if the literal-name dir doesn't exist. |
 | 13 | `status.py` `blueprint_scopes` parser | Reports the CLI's progress message ("Querying Entra ID for…") in the `detail` field instead of the result. State is correct; only the human-readable string is wrong. |
