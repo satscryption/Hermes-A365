@@ -1,4 +1,4 @@
-"""hermes a365 activity-bridge — Bot Framework adapter daemon for A365 agents.
+"""hermes a365 activity-bridge — A365 / MCP-Platform webhook adapter daemon.
 
 Three subcommands:
 
@@ -6,37 +6,63 @@ Three subcommands:
   blueprint's client secret can acquire an OAuth token, that AAD +
   Graph are reachable, and that the per-agent config + generated-config
   files parse cleanly. Useful for CI gates and pre-deploy smoke.
-- ``serve`` (slice 19b): long-running BF webhook adapter. FastAPI app
-  on a local port that operators expose via ``cloudflared`` / reverse
-  proxy. Receives BF activities (JWT-validated against the public
-  Bot Framework JWKS), forwards each one to ``HERMES_BRIDGE_WEBHOOK``
-  with our stable JSON envelope, renders the webhook's JSON response
-  as an Adaptive Card or plain text, and replies via the public BF
-  connector at ``api.botframework.com`` using the bot's MSA client
-  credentials (``botMsaAppId`` + ``agentBlueprintClientSecret`` from
-  ``a365.generated.config.json``).
+- ``serve`` (slice 19b): long-running webhook adapter. FastAPI app on a
+  local port that operators expose via ``cloudflared`` / reverse proxy.
+  Receives A365 activities, forwards each one to
+  ``HERMES_BRIDGE_WEBHOOK`` with our stable JSON envelope, renders the
+  webhook's JSON response as an Adaptive Card or plain text, and
+  replies via ``serviceUrl`` using the agentic three-stage user-FIC
+  token chain.
 - ``update-endpoint`` (slice 19b): thin wrapper around
   ``a365 setup blueprint --m365 --update-endpoint <url>`` so operators
   can pin the agent's messaging endpoint to a tunnel URL with one
   command. Includes the cleanup-then-recreate fallback for the known
   duplicate-name error (Agent365-devTools issue #140).
 
-Per-agent state files (serve mode):
+Per-agent state files (serve mode)::
 
     ~/.hermes/agents/<slug>/bridge.pid    # daemon PID, removed on shutdown
     ~/.hermes/agents/<slug>/bridge.log    # append-only operational log
 
-Auth wiring (verified against Microsoft Learn 2026-05-05):
+Auth wiring (validated end-to-end against the satscryption tenant
+2026-05-05, round-4 walkthrough):
 
-- Inbound JWT validation uses Microsoft's public BF metadata at
-  ``https://login.botframework.com/v1/.well-known/openidconfiguration``.
-  Issuer ``https://api.botframework.com``, audience = bot's appId,
-  RS256, 5-min skew, ``serviceUrl`` claim must match the activity's.
-  JWKS cached for 24h.
-- Outbound replies acquire a token at
-  ``https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token``
-  with scope ``https://api.botframework.com/.default``. Token cached
-  until 5 min before expiry. POST to
+- **Inbound JWT** (slice 19f, supersedes the pre-19f BF-issuer
+  expectation): A365 / MCP Platform issues AAD v2.0 tokens directly
+  to the bot endpoint. Validator pulls JWKS from the AAD v2.0 OIDC
+  document for the configured tenant
+  (``https://login.microsoftonline.com/<tid>/v2.0/.well-known/openid-configuration``),
+  enforces ``iss == https://login.microsoftonline.com/<tid>/v2.0``,
+  ``aud == <blueprint app id>``, RS256, 5-min skew. There is **no**
+  ``serviceUrl`` claim on A365 tokens (it's BF-specific) — the
+  pre-19f claim check is gone.
+- **`azp` allowlist** (slice 19f, defense-in-depth): a valid AAD-v2
+  token from a different sender SP must not be accepted just because
+  it carries our ``aud``. ``BridgeConfig.inbound_azp_allowlist``
+  defaults to ``(5a807f24-c9de-44ee-a3a7-329e88a00ffc,)`` — the
+  Messaging Bot API SP, the same SP we already target for outbound.
+- **Inbound idempotency** (slice 19i): TTL-keyed dedupe on
+  ``(conversationId, activityId)`` short-circuits BF / A365 connector
+  retries. Default TTL 1h via ``BridgeConfig.idempotency_ttl_seconds``.
+  Activities without an ``id`` (some channel-control flows) bypass
+  dedupe — better to over-deliver than to silently drop on missing id.
+- **Inbound serviceUrl gate** (slice 19j): the inbound activity's
+  ``serviceUrl`` must be HTTPS with a hostname ending in one of
+  ``BridgeConfig.trusted_service_url_suffixes`` before the bridge
+  mints any outbound bearer. Default suffixes:
+  ``.trafficmanager.net`` (the load-bearing one — observed on real
+  Teams traffic), ``.botframework.com``, ``.botframework.us``,
+  ``.cloud.microsoft``, ``.azure.com``. Empty allowlist refuses all
+  (treated as a config bug).
+- **Outbound auth** (slice 19e, supersedes the pre-19e BF
+  ``client_credentials`` flow that AADSTS82001'd for A365 agentic
+  apps — see issue #6 for the upstream defect): three-stage agentic
+  user-FIC chain per
+  https://learn.microsoft.com/en-us/entra/agent-id/agent-user-oauth-flow.
+  T1 = blueprint impersonates the agent identity via FMI; T2 = agent
+  identity asserts itself; final = user-context token at the
+  Messaging Bot API resource (``5a807f24-…/.default``). Two-tier
+  cache (T1/T2 shared across users; final per-user). Reply POSTs to
   ``{serviceUrl}/v3/conversations/{conv}/activities/{activity}``.
 
 CLI use::
