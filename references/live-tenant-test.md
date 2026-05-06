@@ -463,6 +463,194 @@ Send a test message in the Teams 1:1 chat with the agent.
 If the responder returns 200 but Teams shows nothing, the bridge log
 is the place to look — that's where outbound reply errors surface.
 
+## 9d. activity-bridge via Hermes plugin (slices 19m + 19n + 19o) — full agent-loop round-trip
+
+Validates the end-to-end runtime: the plugin loaded **inside the
+Hermes harness**, an activity routing through `BasePlatformAdapter
+.handle_message(event)`, the agent loop reasoning, and a reply
+landing back via `Agent365Adapter.send()`. This is the round-N
+acceptance gate for #1 (gateway-platform plugin path).
+
+⚠️ **Prefer §9c first if you're debugging.** If §9d misbehaves,
+drop down to §9c (bridge-only standalone) to bisect — that proves
+the underlying A365 auth + JWT + serviceUrl plumbing without
+Hermes in the path. Once §9c is green, the only remaining variable
+in §9d is the harness wiring.
+
+Prerequisites — same as §9c (cloudflared tunnel up, blueprint
+provisioned, `botMsaAppId` populated, AI Teammate published +
+activated for your user). The Hermes harness must be installed at
+`~/.hermes/hermes-agent/` per the standard install.
+
+### 9d.1 — Install the plugin into Hermes' plugin path
+
+For development, symlink rather than copy so edits land immediately:
+
+```bash
+mkdir -p ~/.hermes/plugins
+ln -sfn "$PWD/plugins/agent365" ~/.hermes/plugins/agent365
+ls -l ~/.hermes/plugins/agent365   # confirm symlink resolves
+```
+
+The plugin auto-discovers `scripts/activity_bridge.py` via a
+sys.path append at module load (relative to the symlink target),
+so the bridge helpers (`validate_inbound_jwt`, `send_reply`,
+`acquire_outbound_token`, the caches) are reused — not vendored.
+Plain copies of the plugin directory without `scripts/` as a
+sibling won't load; that's tracked as a follow-up
+(vendor-the-bridge-into-the-plugin) for whenever this ships outside
+a dev checkout.
+
+### 9d.2 — Wire the platform into Hermes config.yaml
+
+Add the platform block to `~/.hermes/config.yaml`:
+
+```yaml
+gateway:
+  platforms:
+    agent365:
+      enabled: true
+      extra:
+        slug: inbox-helper
+        port: 3978
+        host: 127.0.0.1
+        # blueprint_client_secret read from env or generated config:
+        # generated_config_path: /Users/<you>/satscryption/Hermes-A365/a365.generated.config.json
+```
+
+The plugin reads `A365_TENANT_ID`, `A365_APP_ID`, and
+`A365_BLUEPRINT_CLIENT_SECRET` from env (env wins over `extra`).
+The wrapper's `register --apply` + `instance create --apply` flow
+already populates `~/.hermes/.env` and the per-agent `.env` with
+these. If the secret isn't in env, the plugin falls back to
+reading `agentBlueprintClientSecret` from the generated config
+path (defaulting to cwd, or the `extra.generated_config_path`
+override).
+
+### 9d.3 — Start the Hermes gateway
+
+```bash
+hermes gateway run
+```
+
+(Or whatever the canonical run command is in your harness install
+— check `hermes --help`.) The gateway should:
+
+1. Discover the plugin at `~/.hermes/plugins/agent365`.
+2. Call `register(ctx)` → `ctx.register_platform(name="agent365", …)`.
+3. Construct `Agent365Adapter(cfg)` via the registered factory.
+4. Call `connect()` — uvicorn binds `127.0.0.1:3978`,
+   `_mark_connected()` flips, gateway logs `agent365: connected`.
+5. Load `~/.hermes/agents/inbox-helper/conversations.json` if it
+   exists from prior runs (slice 19o).
+
+Verify connectivity:
+
+```bash
+hermes gateway status
+# expect: agent365 ✓ connected
+curl -fsS http://127.0.0.1:3978/healthz
+# expect: {"ok": true, "slug": "inbox-helper", ...}
+```
+
+⚠️ **If `hermes gateway status` shows `agent365: failed (config_error)`**,
+the adapter's `_make_bridge_config()` couldn't resolve tenant/app/secret
+from env or generated config. Inspect the gateway log for the exact
+missing key. Most common cause: the gateway process inherited a
+shell where `A365_BLUEPRINT_CLIENT_SECRET` isn't exported and cwd
+isn't where `a365.generated.config.json` lives — fix by either
+exporting the env var in the gateway's process, or setting
+`extra.generated_config_path` in `config.yaml` to the absolute path.
+
+### 9d.4 — Re-point messaging endpoint at the gateway tunnel
+
+The bridge under §9c was bound to its own tunnel. Hermes' uvicorn
+takes that role now. Re-run `update-endpoint` against the new
+tunnel URL:
+
+```bash
+# 1. Tunnel — same shape as §9c, but exposes Hermes' uvicorn this time.
+cloudflared tunnel --url http://localhost:3978 &
+# 2. Re-point.
+uv run python scripts/activity_bridge.py update-endpoint \
+    --agent-name "Hermes Inbox Helper" \
+    --url https://<tunnel>.trycloudflare.com/api/messages --apply
+```
+
+The `update-endpoint` wrapper still drives `a365 setup blueprint
+--m365 --update-endpoint <url>` and is gateway-agnostic — it just
+tells MCP Platform where to deliver activities. Whether
+`localhost:3978` is "the bridge" or "Hermes' uvicorn with the plugin
+mounted" is invisible to MCP.
+
+### 9d.5 — Drive a Teams turn through the agent loop
+
+Send a message in the Teams 1:1 chat with **Hermes Inbox Helper**
+(or whichever AI Teammate slug the activation step bound to your
+user).
+
+Acceptance gates — Hermes side:
+
+- [ ] Hermes gateway log shows the inbound activity arriving on
+      `agent365`: `Agent365Adapter.handle_message(...)` fires.
+- [ ] The agent loop runs (look for tool-call lines if your
+      `~/.hermes/skills/` set has any wired) and produces a reply.
+- [ ] The reply hits Teams within ~10 s. (Longer-running turns
+      need the proactive pattern — that's #4, not in scope here.)
+- [ ] `~/.hermes/agents/inbox-helper/conversations.json` was
+      written — open it and confirm the conversation id from your
+      Teams thread is present with `last_inbound_activity_id`
+      pointing at your most recent message.
+
+Acceptance gates — A365 side (regression with §9c):
+
+- [ ] No 401 / 403 in Hermes' uvicorn log on
+      `POST /api/messages` — slice 19f's AAD-v2 validator still
+      accepts Microsoft's tokens with the plugin in the path.
+- [ ] Bridge dedupe (slice 19i) still short-circuits Microsoft's
+      retry deliveries: send a duplicate by tapping send again
+      quickly and confirm only one `handle_message` line for the
+      retry.
+- [ ] Outbound user-FIC chain still mints (slice 19e). The reply
+      activity POST returns 2xx.
+
+### 9d.6 — Restart durability check (slice 19o)
+
+```bash
+# Stop the gateway.
+hermes gateway stop  # or kill the process
+# Confirm the conversations file is on disk.
+cat ~/.hermes/agents/inbox-helper/conversations.json | jq .
+# Restart.
+hermes gateway run
+hermes gateway status   # agent365 ✓ connected
+```
+
+Send another Teams DM. The agent should reply on the same
+conversation thread without you having to seed it again — the
+registry hydrated the chat context on `__init__`. This is the
+precondition that unblocks proactive long-running replies (#4).
+
+- [ ] Across a gateway restart, a Teams DM still gets a reply (no
+      "no cached inbound for chat_id" failure in the gateway log).
+- [ ] `conversations.json` carries the same conversation id before
+      and after the restart.
+
+### 9d.7 — Tear down
+
+For just the runtime (leave the tenant blueprint in place for the
+next run):
+
+```bash
+hermes gateway stop
+pkill -f "cloudflared tunnel"
+rm -f ~/.hermes/agents/inbox-helper/bridge.pid
+# Optional: rm ~/.hermes/agents/inbox-helper/conversations.json
+# to clear chat memory.
+```
+
+For the full tenant cleanup, drop down to §10.
+
 ## 10. cleanup — leave the tenant clean
 
 Slice 18l fixed the argv composition (bug #11) and the local-dir
