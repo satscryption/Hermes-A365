@@ -9,11 +9,17 @@ on gateway startup. No core Hermes changes required.
 
 ```
 plugins/agent365/
-  PLUGIN.yaml         # plugin manifest (loader reads name, version, env reqs)
+  plugin.yaml         # plugin manifest (loader globs for this lowercase form)
   __init__.py         # re-exports register()
   adapter.py          # Agent365Adapter(BasePlatformAdapter) + register(ctx)
+  conversations.py    # ConversationRef + ConversationRegistry (slice 19o)
   README.md           # this file
 ```
+
+> ⚠️ The Hermes plugin loader globs for **lowercase `plugin.yaml`**
+> (`hermes_cli/plugins.py`). The upstream `ADDING_A_PLATFORM.md`
+> docs show `PLUGIN.yaml`, but that variant is silently skipped on
+> case-sensitive POSIX filesystems. Don't rename.
 
 ## Status — slices 19m + 19n + 19o
 
@@ -91,7 +97,7 @@ Required env vars (already populated by the wrapper's
 
 | slice | scope | status |
 |---|---|---|
-| 19m | skeleton — `PLUGIN.yaml`, adapter class, `register(ctx)` | ✅ |
+| 19m | skeleton — `plugin.yaml`, adapter class, `register(ctx)` | ✅ |
 | 19n | port the FastAPI webhook + bridge runtime under `Agent365Adapter`; map inbound → `handle_message(event)`, outbound → `send()` | ✅ |
 | **19o** | durable session table (`conversations.json`) + `send_typing` + `send_image` | ✅ |
 | 19p | round-N walkthrough validation against satscryption.io | next |

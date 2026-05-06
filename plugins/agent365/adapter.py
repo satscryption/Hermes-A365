@@ -670,10 +670,18 @@ def validate_config(config: Any) -> bool:
     return bool(tenant and app)
 
 
-def is_connected() -> bool:
-    """Best-effort liveness probe. Slice 19o will plumb this through
-    the actual adapter instance."""
-    return True
+def is_connected(config: Any) -> bool:
+    """Plugin-loader liveness probe.
+
+    Signature is ``Callable[[Any], bool]`` per
+    ``gateway/platform_registry.py:64`` — the registry passes the
+    ``PlatformConfig`` so the probe can inspect operator config without
+    holding an adapter instance. We treat "configured well enough to
+    connect" as the connection signal here, mirroring IRC's pattern;
+    actual liveness is observable via ``GET /healthz`` once
+    ``connect()`` has run.
+    """
+    return validate_config(config)
 
 
 def register(ctx: Any) -> None:

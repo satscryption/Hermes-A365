@@ -211,12 +211,28 @@ def _make_inbound(
 
 class TestPluginManifest:
     def test_plugin_yaml_present_and_parseable(self) -> None:
-        path = _REPO_ROOT / "plugins" / "agent365" / "PLUGIN.yaml"
+        # Lowercase filename matches the harness loader's glob
+        # (`hermes_cli/plugins.py`); uppercase `PLUGIN.yaml` from the
+        # docs example is silently skipped by discovery.
+        path = _REPO_ROOT / "plugins" / "agent365" / "plugin.yaml"
         assert path.exists()
         text = path.read_text()
         for key in ("name:", "version:", "description:", "requires_env:"):
-            assert key in text, f"PLUGIN.yaml missing {key!r}"
+            assert key in text, f"plugin.yaml missing {key!r}"
         assert "name: agent365" in text
+
+    def test_uppercase_manifest_not_present(self) -> None:
+        # Regression guard: the harness loader globs for lowercase
+        # `plugin.yaml`. macOS APFS is case-insensitive by default
+        # so Path.exists() can't distinguish — list the directory
+        # and check the actual on-disk name. On Linux the loader is
+        # case-sensitive and an uppercase variant would be skipped.
+        plugin_dir = _REPO_ROOT / "plugins" / "agent365"
+        names = {p.name for p in plugin_dir.iterdir()}
+        assert "plugin.yaml" in names
+        assert "PLUGIN.yaml" not in names, (
+            "PLUGIN.yaml re-introduced — harness loader globs for lowercase"
+        )
 
     def test_init_reexports_register(self) -> None:
         assert hasattr(agent365, "register")
@@ -260,6 +276,29 @@ class TestCheckRequirements:
         # Bridge extras (httpx, fastapi, jwt, uvicorn) are in the dev
         # venv per the existing bridge tests.
         assert adapter_mod.check_requirements() is True
+
+
+class TestIsConnected:
+    """Slice 19o follow-up — `is_connected(config)` signature must
+    match `gateway/platform_registry.py:64` (`Callable[[Any], bool]`).
+    Earlier 19m drafts had a 0-arg version that would have crashed
+    the loader's status check at first call."""
+
+    def test_takes_config_argument(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("A365_TENANT_ID", "t")
+        monkeypatch.setenv("A365_APP_ID", "a")
+        cfg = _StubPlatformConfig(extra={})
+        assert adapter_mod.is_connected(cfg) is True
+
+    def test_returns_false_when_unconfigured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("A365_TENANT_ID", raising=False)
+        monkeypatch.delenv("A365_APP_ID", raising=False)
+        cfg = _StubPlatformConfig(extra={})
+        assert adapter_mod.is_connected(cfg) is False
 
 
 class TestValidateConfig:

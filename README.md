@@ -228,7 +228,7 @@ Open issues in this repo (run `gh issue list` for current state):
 
 - **[#1](../../issues/1)** — Hermes gateway platform plugin
   (`agent365`). The activity bridge becomes a `BasePlatformAdapter`,
-  registered via `~/.hermes/plugins/agent365/PLUGIN.yaml`. SPEC §10
+  registered via `~/.hermes/plugins/agent365/plugin.yaml`. SPEC §10
   Q1 resolved 2026-05-05 by inspecting the bundled harness — Hermes
   ships a documented platform-plugin contract (`gateway/platforms/ADDING_A_PLATFORM.md`),
   so the plugin path is unblocked even before Hermes#20133 lands.
