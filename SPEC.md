@@ -432,7 +432,7 @@ sequenceDiagram
   Cli->>En: create T2 confidential client
   Sk->>Cli: a365 fic configure --app=[T2]
   Cli->>En: configure user-FIC
-  Sk-->>U: appId(T1), appId(T2), tenant_id; secret stored in keychain
+  Sk-->>U: appId(T1), appId(T2), tenant_id, secret stored in keychain
 
   U->>Sk: hermes a365 consent
   Sk-->>U: consent URL (templates/consent-url.txt.j2)
@@ -480,7 +480,7 @@ sequenceDiagram
   Bf->>Br: message activity (JSON)
   Br->>K: fetch T2 secret / FIC token
   K-->>Br: token (in-memory only)
-  Br->>H: handle_message(event) via gateway<br/>(BasePlatformAdapter; see §10 Q1)
+  Br->>H: handle_message(event) via gateway<br/>(BasePlatformAdapter, see §10 Q1)
   H->>H: agent reasoning<br/>(model calls + Work IQ MCP via A365)
   H-->>Br: response payload
   alt Plain reply
