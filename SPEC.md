@@ -432,7 +432,7 @@ sequenceDiagram
   Cli->>En: create T2 confidential client
   Sk->>Cli: a365 fic configure --app=[T2]
   Cli->>En: configure user-FIC
-  Sk-->>U: appId(T1), appId(T2), tenant_id; secret → keychain
+  Sk-->>U: appId(T1), appId(T2), tenant_id; secret stored in keychain
 
   U->>Sk: hermes a365 consent
   Sk-->>U: consent URL (templates/consent-url.txt.j2)
