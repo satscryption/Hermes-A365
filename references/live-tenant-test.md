@@ -2,17 +2,23 @@
 
 End-to-end runbook for verifying the v0.2 skill against a real Microsoft
 Agent 365 tenant. Walk top-to-bottom on first run; expect ~30–45 minutes
-including the M365 Admin Centre approval step.
+including the M365 Admin Centre approval step (longer if the tenant is
+on macOS 26 — see §3's device-code-volume failure mode).
 
-**Snapshot:** 2026-05-05 (first live walkthrough completed; Slice 18i).
-Pinned against `e8c4282` (Slice 18g) plus the fixes in Slice 18i.
+**Snapshot:** 2026-05-07 (rounds 1–6 incorporated). Tracks the current
+`main` branch; specific slices are referenced inline where they
+matter to operator behaviour.
 
-> **Walkthrough notes (2026-05-05):** The first end-to-end run on a real
-> tenant surfaced a number of wrapper bugs and CLI realities that diverge
-> from the original runbook draft. Inline ⚠️ callouts below capture them;
-> the open-bug summary at the end lists fixes queued for slices 18j+.
-> If you hit something the runbook doesn't predict, that's a high-signal
-> finding — log it.
+> **Round history:** rounds 1–6 ran against this tenant between
+> 2026-05-05 and 2026-05-07. Each round surfaced a discrete bug
+> bundle that landed as slices 18i–19s. The runbook's ⚠️ callouts
+> capture findings still active against current GA (e.g. the
+> [#408](https://github.com/microsoft/Agent365-devTools/issues/408)
+> persistence regression in §3, which reproduces 100% across CLI
+> 1.1.171 → 1.1.174); the **[Wrapper-bug fix history](#wrapper-bug-fix-history-rounds-16)**
+> section at the end summarises the wrapper-side fix history. If
+> you hit something the runbook doesn't predict, that's a
+> high-signal finding — log it.
 
 ## What you need before starting
 
@@ -33,7 +39,7 @@ Pinned against `e8c4282` (Slice 18g) plus the fixes in Slice 18i.
   hard-codes the same default (`probe_custom_client_app`); if your
   operator named the app differently, rename in Entra rather than
   registering a duplicate.
-- Local prereqs: `a365` CLI ≥ 1.0.0 (verified GA: 1.1.171), `az` CLI
+- Local prereqs: `a365` CLI ≥ 1.0.0 (verified GA: 1.1.171, 1.1.174), `az` CLI
   ≥ 2.55.0 signed in to the target tenant (`az login --tenant <tenant>`),
   `pwsh` 7+ on PATH (install via `brew install powershell` — the cask
   variant is deprecated), an OS keychain backend (macOS Security or
@@ -65,11 +71,12 @@ A365_APP_ID=                                         # fill in manually after re
 HERMES_OTLP_ENDPOINT=https://<tenant>.otel.agent365.microsoft.com
 ```
 
-⚠️ The earlier draft of this runbook claimed `register` populates
-`A365_APP_ID` and `license` populates `A365_LICENSE_MODEL`. Neither
-wrapper writes to this file in v0.2 — you fill the keys in by hand
-after blueprint creation prints the appId. (Bug queued for slice
-18j.)
+By design, `register` and `license` don't write to `~/.hermes/.env`
+— it's the operator's surface. After `register --apply`, copy the
+new `agentBlueprintId` from `a365.generated.config.json` into
+`A365_APP_ID` here. The per-agent `.env` (written by `instance
+create --apply` to `~/.hermes/agents/<slug>/.env`) inherits these
+values and adds `AA_INSTANCE_ID`.
 
 In the repo root, you'll also want a working `a365.config.json` —
 register populates derived display names there on `--apply`:
@@ -309,27 +316,50 @@ would discard.
 
 ## 6. publish — register agent instance via Graph
 
-⚠️ **GA reality differs from earlier docs.** For blueprint-only agents
-(default — no `--aiteammate` flag), `a365 publish` does **not** create
-a manifest zip. Instead it `POST`s to
-`/beta/agentRegistry/agentInstances` to register the instance and
-saves the resulting `agentInstanceId` into `a365.generated.config.json`.
-The `--use-blueprint` flag in the GA help text (`a365 publish --help`)
-documents this: "blueprint-based non-DW flow (calls Agent Instance
-Graph API, no manifest)".
+`a365 publish` has two modes:
 
-Manifest packaging only applies to AI Teammate agents (`--aiteammate`),
-which our wrapper doesn't currently distinguish from blueprint-only
-mode (queued for slice 18j).
+- **Blueprint-only (default, no `--aiteammate`)** — `POST`s to
+  `/beta/agentRegistry/agentInstances` to register the instance and
+  saves the resulting `agentInstanceId` into
+  `a365.generated.config.json`. No manifest zip.
+- **AI Teammate (`--aiteammate`)** — emits a manifest zip the operator
+  uploads via M365 Admin Centre (see §7).
+
+The wrapper distinguishes these (slice 18t): plan output prints
+`output: Graph API instance registration (no zip)` vs `manifest zip
+for M365 Admin Centre upload`; result extracts the appropriate
+artefact (instance id vs zip path); post-apply messages branch (no
+admin-centre prompt for blueprint-only).
+
+Dry-run, then apply:
 
 ```bash
-a365 publish --agent-name "<display-name>" --tenant-id <tenant-id>
+uv run python scripts/publish.py --agent-name "<display-name>" --tenant-id <tenant-id>
+uv run python scripts/publish.py --agent-name "<display-name>" --tenant-id <tenant-id> --apply
 ```
 
-Expected output ends with `Agent instance registered: <guid>`.
+Add `--aiteammate` for the AI Teammate flow.
 
-- [ ] `Agent instance registered: <guid>` printed; `agentInstanceId`
-      now populated in `a365.generated.config.json`.
+⚠️ **`a365 publish` clobbers local secret + bot identity fields.**
+Round-3 caught that running `publish --apply` after `register --apply`
+nulls `agentBlueprintClientSecret` (along with `botMsaAppId`,
+`botId`, `messagingEndpoint`) in `a365.generated.config.json`. The
+underlying credential is unaffected on the Entra side. Recover by
+either re-running `update-endpoint --apply` (to restore bot identity)
++ `az ad app credential reset --id <agentBlueprintId> --append` (to
+mint a new secret); or by `cleanup -y` and re-doing `register`
+without `publish` — `update-endpoint --apply` registers an agent
+identity on its own. **Possibly the same root cause as
+[microsoft/Agent365-devTools#408](https://github.com/microsoft/Agent365-devTools/issues/408)**
+(post-`setup blueprint` persistence regression) — flagged in #408's
+related-defects callout.
+
+- [ ] Blueprint-only: `Agent instance registered: <guid>` printed;
+      `agentInstanceId` now populated in `a365.generated.config.json`.
+- [ ] AI Teammate: `manifest zip: <path>` printed; zip exists.
+- [ ] If using publish in the same session as register: re-verify
+      `agentBlueprintClientSecret` is still populated; recover per
+      the warning above if not.
 
 ## 7. Operator step — Admin Centre (AI Teammate flow only)
 
@@ -349,16 +379,13 @@ upload the zip:
 - [ ] (AI Teammate only) Agent visible in Teams app catalog for the
       test user.
 
-## 8. End-to-end activity — test message
+## 8. End-to-end activity — telemetry-only smoke test
 
-The activity bridge is still TODO (SPEC §10 Q1), so this step verifies
-the **A365 governance plane** is wired up, not the Hermes runtime
-roundtrip. Until activity-bridge ships, expect either:
-
-- A `default` Microsoft response card (governance OK, no Hermes
-  runtime), or
-- An empty / loading card if the bot endpoint isn't yet bound — that's
-  acceptable for this test.
+This step verifies the **A365 governance plane** is wired up
+(telemetry trace surfaces in admin-centre). The full Hermes runtime
+round-trip lives in §9c (standalone bridge) and §9d (Hermes plugin
+path); both shipped via slices 19a–19o and replace what was a TODO
+in earlier drafts of this runbook.
 
 Drive a test message:
 
@@ -366,12 +393,15 @@ Drive a test message:
 2. Send a plain `hello`.
 3. Open the M365 Admin Centre → Agent 365 → Telemetry within ~5 min.
 
+Without §9c/§9d running, expect either a `default` Microsoft
+response card (governance OK, no Hermes runtime) or an empty /
+loading card if the bot endpoint isn't bound — both acceptable for
+this step. With the bridge or plugin running, you'll get an actual
+agent response; that's the §9c / §9d acceptance gate, not §8's.
+
 - [ ] OTLP trace appears for the test message in the admin-centre
       telemetry view (or in your tenant's connected backend if you've
       configured one; the OTLP endpoint is in `~/.hermes/.env`).
-
-When activity-bridge ships, this step gets a second checkbox: an
-Adaptive Card response from the Hermes agent.
 
 ## 9. status — sanity check against `query-entra`
 
@@ -381,8 +411,12 @@ echo "exit=$?"
 ```
 
 **Pass criterion:** all three cloud components report `ok`. The
-overall report returns `partial` / exit 1 because `activity_bridge:
-missing` (expected until the bridge ships).
+overall report returns `partial` / exit 1 if `activity_bridge:
+not_running` (the probe checks for `bridge.pid` in
+`~/.hermes/agents/<slug>/`; absent when neither §9c nor §9d is
+currently running). Run §9b's `bridge verify` for runtime config
+sanity, or §9c / §9d to actually start the bridge if you want a
+green `activity_bridge` row.
 
 You can now pass either the slug (`inbox-helper`) or the display name
 (`"Hermes Inbox Helper"`) — slice 18l made `gather_local_config`
@@ -446,10 +480,16 @@ local secret.** If you run `register --apply` then `publish --apply`,
 `messagingEndpoint`). Two ways to recover:
 
 1. Re-run `update-endpoint --apply` to restore the bot identity from
-   server state, then `az ad app credential reset --id
-   <agentBlueprintId> --append` to mint a new secret. Patch the
-   secret into `a365.generated.config.json` (the `agentBlueprintClientSecret`
-   key) and `chmod 600` the file.
+   server state, then run the `register --auto-recover-secret
+   --apply` path (slice 19s) to detect and patch the missing secret
+   automatically. The slice-19s recovery path was designed for the
+   post-`setup blueprint` regression
+   ([Microsoft#408](https://github.com/microsoft/Agent365-devTools/issues/408))
+   but the post-`publish` clobber leaves the same null-on-disk
+   shape, so the same flag fixes it. Manual fallback if you'd
+   rather not re-run `register`: `az ad app credential reset --id
+   <agentBlueprintId> --append`, then patch the resulting
+   `.password` into `agentBlueprintClientSecret` and `chmod 600`.
 2. Or just `cleanup -y` and re-do register without ever calling
    publish — `update-endpoint --apply` registers an agent identity
    on its own.
@@ -891,10 +931,11 @@ If a step fails, **do not** skip ahead — most downstream steps depend on
 the prior step's tenant state. Fix in place or run `cleanup` and start
 over.
 
-## Open wrapper bugs queued for slices 18j+
+## Wrapper-bug fix history (rounds 1–6)
 
-Captured during the 2026-05-05 walkthrough. Each is a discrete, small
-fix; none requires architectural rework except the last.
+Captured during the 2026-05-05 → 2026-05-07 walkthrough sequence.
+Each is a discrete, small fix; the table below is the historical
+record — every row is now closed (the architectural one too).
 
 | # | File / area | Symptom |
 |---|---|---|
@@ -914,5 +955,6 @@ fix; none requires architectural rework except the last.
 | 14 | `publish.py` wrapper | ~~Doesn't distinguish blueprint-only vs `--aiteammate` flow.~~ **Fixed in slice 18t** — plan output now prints `output:  Graph API instance registration (no zip)` vs `manifest zip for M365 Admin Centre upload`; result extracts the appropriate artefact (instance id vs zip path); post-apply messages branch (no admin-centre prompt for blueprint-only). |
 | 15 | SKILL.md / runbook | ~~Claim "T2 client secret lives only in the keychain".~~ **Doc-fixed in slice 18s** — SKILL.md pitfall #7 now describes the macOS / Linux plaintext-on-disk reality and the gitignored backup-file risk. |
 | 16 | `references/a365-cli-reference.md:144` | ~~`brew install --cask powershell` is deprecated.~~ **Doc-fixed in slice 18s** — references doc now says `brew install powershell` (the formula) and notes the cask was renamed to `powershell@preview` and flagged for Gatekeeper failures. Snapshot also gained the macOS `DOTNET_ROOT` gotcha that bit the walkthrough. |
-| 17 | `mutator.py` (architectural) | `subprocess.run(capture_output=True)` blocks until completion, so device-code prompts and admin-consent flows from `a365 setup *` are invisible. Slice 18i bumped the timeout to 900 s as a stop-gap. The proper fix is line-streamed output via `Popen` with `stdout=PIPE` and a reader thread. |
-| 18 | `setup permissions bot` interaction | **Resolved upstream — intended behaviour with cosmetic logging gap.** Filed with Microsoft as [microsoft/Agent365-devTools#402](https://github.com/microsoft/Agent365-devTools/issues/402); reply on 2026-05-05 from @sellakumaran clarifies: (a) the blueprint SP is **supposed to** receive only the `Agent365Observability` S2S app-role assignment — Messaging Bot API and Power Platform API are configured via delegated OAuth2 grants only, the misleading `Configuring S2S app role assignments...` header will be reworded; (b) the mid-run "non-admin user" message is a real bug but cosmetic — fires on `AppRoleAssignment.ReadWrite.All` consent state, not a role check, and the PowerShell fallback acquires the token interactively, so a run that exits 0 completed correctly; (c) the unconditional `Bot API permissions configured successfully` log will be gated on the actual S2S outcome. All three fixes ship in the next CLI release. **Do not** manually `POST /servicePrincipals/<sp>/appRoleAssignments` for Messaging Bot / Power Platform — that would grant privileges the system doesn't intend. Operator-side query (informational only): `az rest --method GET --url "https://graph.microsoft.com/v1.0/servicePrincipals/<blueprint-sp-id>/appRoleAssignments" --query "value[].{resource:resourceDisplayName, role:appRoleId}" -o table` — expect exactly one row (`Agent365Observability`). |
+| 17 | `mutator.py` (architectural) | ~~`subprocess.run(capture_output=True)` blocks until completion, so device-code prompts and admin-consent flows from `a365 setup *` are invisible.~~ **Fixed in slice 18j** — replaced with `_run_streaming` (line-buffered Popen + `select.select` deadline + stderr→stdout merge). Device-code prompts surface in real time; round-6 (2026-05-07) drove `register --apply` end-to-end through the wrapper this way. The 900 s timeout from slice 18i remains as the per-step ceiling. |
+| 18 | `setup permissions bot` interaction | **Resolved upstream — intended behaviour with cosmetic logging gap.** Filed with Microsoft as [microsoft/Agent365-devTools#402](https://github.com/microsoft/Agent365-devTools/issues/402); reply on 2026-05-05 from @sellakumaran clarifies: (a) the blueprint SP is **supposed to** receive only the `Agent365Observability` S2S app-role assignment — Messaging Bot API and Power Platform API are configured via delegated OAuth2 grants only, the misleading `Configuring S2S app role assignments...` header will be reworded; (b) the mid-run "non-admin user" message is a real bug but cosmetic — fires on `AppRoleAssignment.ReadWrite.All` consent state, not a role check, and the PowerShell fallback acquires the token interactively, so a run that exits 0 completed correctly; (c) the unconditional `Bot API permissions configured successfully` log will be gated on the actual S2S outcome. **All three fixes shipped in 1.1.174** (verified 2026-05-07 via NuGet changelog scan). **Do not** manually `POST /servicePrincipals/<sp>/appRoleAssignments` for Messaging Bot / Power Platform — that would grant privileges the system doesn't intend. Operator-side query (informational only): `az rest --method GET --url "https://graph.microsoft.com/v1.0/servicePrincipals/<blueprint-sp-id>/appRoleAssignments" --query "value[].{resource:resourceDisplayName, role:appRoleId}" -o table` — expect exactly one row (`Agent365Observability`). |
+| 19 | `register.py` / GA CLI persistence regression | After `setup blueprint` claims success, `agentBlueprintClientSecret` is `null` on disk on macOS / Linux. **Wrapper-side coverage in slice 19s** — `register.py` detects + warns by default and runs `az ad app credential reset --append` + patches the generated config + `chmod 0600` when `--auto-recover-secret` is set. Layer 1 fix `9e0187e`; live-found follow-up `4b1a2e8` extracts JSON past the `az -o json` credential-protection WARNING that `_run_streaming`'s stderr→stdout merge dumped into stdout. Filed upstream as [microsoft/Agent365-devTools#408](https://github.com/microsoft/Agent365-devTools/issues/408); reproduces 100% across CLI 1.1.171 → 1.1.174. |
