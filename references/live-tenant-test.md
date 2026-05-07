@@ -412,7 +412,7 @@ echo "exit=$?"
 
 **Pass criterion:** all three cloud components report `ok`. The
 overall report returns `partial` / exit 1 if `activity_bridge:
-not_running` (the probe checks for `bridge.pid` in
+missing` (the probe checks for `bridge.pid` in
 `~/.hermes/agents/<slug>/`; absent when neither §9c nor §9d is
 currently running). Run §9b's `bridge verify` for runtime config
 sanity, or §9c / §9d to actually start the bridge if you want a

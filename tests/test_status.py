@@ -290,7 +290,8 @@ class TestActivityBridge:
     def test_missing_pid_file(self, tmp_path: Path) -> None:
         result = gather_activity_bridge(tmp_path, "inbox-helper")
         assert result.state == "missing"
-        assert "SPEC §10 Q1" in result.detail
+        assert "bridge.pid not found" in result.detail
+        assert "live-tenant-test.md" in result.detail
 
     def test_alive_pid(self, tmp_path: Path) -> None:
         agent_dir = tmp_path / "agents" / "inbox-helper"

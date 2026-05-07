@@ -57,12 +57,24 @@ permissions.
 
 ## Bot Framework activity errors
 
-The activity bridge (TODO; blocked on §10 Q1) will need to handle BF-side
-errors distinct from AADSTS. Placeholder for the catalogue:
+The activity bridge (slices 19a–19o, see
+`scripts/activity_bridge.py` + `plugins/agent365/`) handles BF-side
+errors distinct from AADSTS. Catalogue captured during round-N
+walkthroughs to date:
 
 - `BadRequest` on activity post — malformed Adaptive Card.
-- `Forbidden` on activity post — instance not deployed to the channel that
-  emitted the activity.
-- `NotFound` on conversation reference — conversation expired (Teams TTL).
+- `Forbidden` on activity post — instance not deployed to the channel
+  that emitted the activity.
+- `NotFound` on conversation reference — conversation expired (Teams
+  TTL is ~24 h after last activity; the adapter re-resolves on
+  `NotFound`, see `references/activity-protocol-shapes.md`).
+- `401 Unauthorized` on inbound — AAD-v2 JWT validator (slice 19f)
+  rejects the token; check the issuer / audience claim shape.
+- `403 Forbidden` on `serviceUrl` POST — host suffix not in the
+  allowlist (slice 19j); see `_TRUSTED_SERVICE_URL_HOST_SUFFIXES` in
+  `scripts/activity_bridge.py`.
 
-This section will be filled in once the activity bridge ships.
+Live-tenant rounds 1–6 only validated happy paths; the error shapes
+above are documented from BF spec / live miss observations.
+Add freshly-observed error envelopes here as walkthroughs surface
+them.

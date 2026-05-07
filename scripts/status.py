@@ -9,10 +9,12 @@ actually supports.
   agent's blueprint.
 - ``instance_scopes``  — ``a365 query-entra instance-scopes`` for the
   agent's instance.
-- ``activity_bridge``  — local PID-file probe (only when agent_name given
-  AND ``bridge.pid`` exists). Activity bridge upstream work is still
-  TODO (SPEC §10 Q1); the probe stays so the future bridge can be
-  liveness-checked here.
+- ``activity_bridge``  — local PID-file probe (only when agent_name given).
+  Reports ``ok`` when ``bridge.pid`` exists and the recorded PID is alive,
+  ``missing`` when no pidfile is present (bridge not currently running),
+  and ``error`` on stale pidfile / unreadable contents. The bridge itself
+  has shipped — runtime walkthroughs are in ``references/live-tenant-test.md``
+  §9c (standalone serve) and §9d (Hermes plugin path).
 
 Components dropped vs v0.1:
 - ``license`` — A365 SKUs are queried via Microsoft Graph subscribedSkus,
@@ -279,7 +281,10 @@ def gather_activity_bridge(hermes_home: Path, agent_name: str) -> StatusComponen
         return StatusComponent(
             "activity_bridge",
             _MISSING,
-            "bridge.pid not found (bridge not started; SPEC §10 Q1 still TODO)",
+            (
+                "bridge.pid not found (bridge not currently running; "
+                "start via §9c or §9d in references/live-tenant-test.md)"
+            ),
             {"pid_file": str(pid_file)},
         )
     try:

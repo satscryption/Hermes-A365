@@ -1,11 +1,15 @@
 # Bot Framework activity shapes
 
-Snapshot date: 2026-05-04
+Snapshot date: 2026-05-04 (SPEC §10 Q1 framing); content additions
+through 2026-05-07.
 
-The activity bridge (SPEC §6.7) is currently TODO, blocked on §10 Q1
-(Hermes IPC contract). This file is a forward-looking snapshot of the
-Bot Framework activity shapes the bridge will need to handle once it
-ships, so the templates and renderers are ready.
+The activity bridge has shipped — slice 19a `verify`, 19b–19c `serve`
++ reference responder, 19e outbound user-FIC chain, 19m–19o Hermes
+gateway plugin path. SPEC §10 Q1 was resolved by slice 19l (the
+plugin contract was already documented in the upstream Hermes
+harness). This file documents the Bot Framework activity shapes the
+bridge handles in production today plus the invoke-shape work
+in-flight under [#18](../../issues/18) (slice 19w).
 
 ## Subscription endpoint
 
@@ -79,13 +83,18 @@ inbound activity:
 ```
 
 The bridge persists the reference for proactive messages (e.g. agent
-reaches out first). Persistence path TBD — likely
-`~/.hermes/agents/<slug>/conversations.json`, encrypted at rest.
+reaches out first) at `~/.hermes/agents/<slug>/conversations.json`,
+mode 0600. Implemented in slice 19o (`ConversationRegistry`); see
+`plugins/agent365/conversations.py` for the schema.
 
-## TODO once bridge ships
+## Open snapshots
 
-- Catalogue the actual error envelopes BF returns on bad activity.
-- Snapshot a real `query-entra --instance-channel` payload from a test
-  tenant.
-- Document the IPC contract Hermes harness exposes for the bridge to
-  invoke (this is the §10 Q1 unblocker).
+Forward-looking documentation gaps; capture during the next live walk:
+
+- Catalogue the actual error envelopes BF returns on bad activity
+  (round-N walkthroughs have only validated happy paths).
+- Snapshot a real `query-entra --instance-channel` payload from a
+  Frontier-Preview tenant for inclusion above.
+- Invoke-activity shapes (`task/{fetch,submit}`, `composeExtension/*`,
+  `signin/*`, `search`) are tracked under
+  [#18](../../issues/18) (slice 19w).
