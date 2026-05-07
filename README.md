@@ -284,10 +284,15 @@ Open issues in this repo (run `gh issue list` for current state):
   GA CLI's client-secret persistence regression (hit on three
   consecutive walkthroughs).
 - **[#18](../../issues/18)** — Slice 19w: handle invoke activities
-  (`task/{fetch,submit}` for Outlook compose-action,
-  `composeExtension/*` for Teams compose, `signin/verifyState` for
-  OAuth tools). Umbrella with per-name children. Supersedes the
-  older #5.
+  (BF wire-protocol). Foundation slices 19w-a (typed dispatch +
+  `InvokeContext` + response builders) and 19w-b (generalised
+  `TokenFactory`) land first; per-name children 19w-c..g handle
+  `task/{fetch,submit}` + `adaptiveCard/action`,
+  `composeExtension/*`, `signin/{verifyState,tokenExchange}`,
+  `search` + `searchMessageExtension/query`, and invoke-aware
+  idempotency replay independently after that. Work IQ V2 amplifier
+  work (search-invoke fast-path, auto-grounding, V2 token bootstrap)
+  split out to [#21](../../issues/21). Supersedes the older #5.
 
 **Deferred (pending operator demand):**
 
@@ -309,6 +314,17 @@ explicit triggers that would re-prioritise it.
   idempotency cache, FIC chain). Defer the formal split until a
   third runtime (e.g., embed in operator's FastAPI app, serverless
   function) is concretely needed.
+- **[#21](../../issues/21)** — Work IQ V2 → invoke amplifiers. Once
+  #18's `InvokeContext` + `TokenFactory` are in place, six BF invoke
+  names (`composeExtension/{query,queryLink,anonymousQueryLink}`,
+  `search`, `searchMessageExtension/query`, `task/fetch` grounding,
+  `signin/verifyState` bootstrap) can be answered by Work IQ V2 MCP
+  `tools/call` directly, bypassing the agent loop. Defer until a
+  tenant with V2 per-workload-app consent asks us to back
+  compose-extension search, or until 19w-g telemetry shows
+  search-shaped invokes dominate (>40%) and the LLM-loop fallback
+  cost justifies the build. Sibling of #18; depends on #18
+  foundation slices (19w-a + 19w-b).
 
 **Recent closures (round-5 deliverables):**
 
