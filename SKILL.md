@@ -313,4 +313,5 @@ Subcommand implementations live under `scripts/`; each is a thin CLI
 over a planner + applier pair parameterised by a `Mutator` protocol so
 the apply path is unit-testable without the live A365 CLI. Templates
 under `templates/`, dated reference snapshots under `references/`.
-Canonical design and full per-subcommand examples are in `SPEC.md`.
+For per-subcommand flags see `hermes a365 <verb> --help`; the original
+v0.1 design draft is archived at `docs/historical/SPEC-v0.1-draft.md`.

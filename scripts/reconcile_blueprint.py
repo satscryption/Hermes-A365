@@ -1,7 +1,7 @@
 """Reconcile desired vs actual A365 agent blueprint state.
 
-Spec: SPEC.md §6.4. Used by the (TODO) ``blueprint create`` command to
-produce idempotent PATCH plans against existing blueprints. The reconciler
+Used by the ``blueprint create`` flow to produce idempotent PATCH plans
+against existing blueprints. The reconciler
 is generic: it operates on dict payloads (the rendered desired blueprint
 from ``render_blueprint.py`` and the actual blueprint as returned by
 ``a365 query-entra --blueprint=<slug>``).

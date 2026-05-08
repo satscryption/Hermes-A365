@@ -81,23 +81,25 @@ the Hermes harness.
 
 ## Repo split
 
-This repo holds the **design artefacts** — spec, references, scripts,
-templates, and the bridge daemon. The eventual upstream `SKILL.md` is
-contributed into the Hermes Agent harness at
-`hermes-agent/optional-skills/cloud-platforms/hermes-a365/SKILL.md`,
-pulling these artefacts in at contribution time. See
-[`SPEC.md` §3.1](SPEC.md) for the full rationale.
+This repo holds the **design artefacts** — references, scripts,
+templates, the activity bridge, and the gateway plugin. The
+upstream `SKILL.md` is contributed into the Hermes Agent harness
+at `hermes-agent/optional-skills/cloud-platforms/hermes-a365/SKILL.md`,
+pulling these artefacts in at contribution time. The original
+v0.1 design draft is archived at
+[`docs/historical/SPEC-v0.1-draft.md`](docs/historical/SPEC-v0.1-draft.md).
 
 ## Repo layout
 
 ```
 .
-├── SPEC.md                  # Authoritative design spec
+├── README.md                # This file (current spec — what ships, how to run it)
+├── CHANGELOG.md             # Per-tag highlights + known limitations
 ├── SKILL.md                 # Validator-compliant upstream contribution
-├── README.md                # This file
 ├── LICENSE                  # MIT
 ├── pyproject.toml           # Python 3.11+; uv-managed; optional [bridge] extras
 ├── docs/
+│   ├── historical/          # Archived design drafts (e.g. SPEC-v0.1-draft.md)
 │   └── submissions/         # Archived drafts of upstream issues we've filed
 ├── references/              # Dated snapshots + operator runbooks
 │   ├── a365-cli-reference.md

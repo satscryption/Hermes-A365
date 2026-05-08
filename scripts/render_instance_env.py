@@ -1,7 +1,7 @@
 """Render the per-agent ``.env`` file for ``hermes a365 instance create``.
 
-Spec: SPEC.md §6.5. The output is the file written to
-``~/.hermes/agents/<slug>/.env``. Note that the blueprint client secret
+The output is the file written to ``~/.hermes/agents/<slug>/.env``.
+Note that the blueprint client secret
 is **never** written to this file; the activity bridge pulls it from
 the OS keychain (or, on macOS / Linux where DPAPI isn't available,
 from ``a365.generated.config.json`` per slice 18i's gitignore).

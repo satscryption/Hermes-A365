@@ -1,6 +1,6 @@
 """hermes a365 consent — admin-consent URL rendering and grant polling.
 
-Spec: SPEC.md §6.3. Three steps:
+Three steps:
 
 1. Render the admin-consent URL from ``templates/consent-url.txt.j2`` using
    ``A365_TENANT_ID`` and ``A365_APP_ID`` (the blueprint Entra app id)

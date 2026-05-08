@@ -34,11 +34,13 @@ single CLI-shaped surface Microsoft publishes.
 
 ## ⚠️ Spec drift discovered 2026-05-04
 
-The original SPEC.md in this repo (drafted 2026-05-03 from public
-documentation that pre-dated the GA release) assumed a CLI command surface
-that **does not match the GA reality**. Major divergences:
+The v0.1 design draft (now at
+[`docs/historical/SPEC-v0.1-draft.md`](../docs/historical/SPEC-v0.1-draft.md),
+drafted 2026-05-03 from public documentation that pre-dated the GA
+release) assumed a CLI command surface that **does not match the GA
+reality**. Major divergences:
 
-| What SPEC.md / scripts/ assumed | What the CLI actually exposes |
+| What the v0.1 draft / scripts/ assumed | What the CLI actually exposes |
 |---|---|
 | Two CLI variants: `a365` (.NET) + `atk` (npm) | One CLI: `a365` (.NET only). No npm equivalent. |
 | `setup app --tier=1`, `setup app --tier=2` | No tier split. `setup blueprint` creates a single Entra app for the blueprint; the agent **identity** is auto-created server-side. |
@@ -51,13 +53,12 @@ that **does not match the GA reality**. Major divergences:
 | `query-entra --by-name`, `--by-app-id`, `--license`, `--telemetry`, `--instance-channel`, `--scopes`, `--fic`, `--blueprint`, `--instance`, `--consent-status` | None of these flags exist. The full `query-entra` surface is two subcommands: `blueprint-scopes` and `instance-scopes`. |
 | Operator runs the skill, the skill registers the Entra apps for them | **Reverse:** operator must pre-register a custom Entra client app named "Agent 365 CLI" (with delegated Graph permissions and admin consent) **before** the CLI works. The CLI then runs *as* that app. See [Custom Client App Registration](https://learn.microsoft.com/microsoft-agent-365/developer/custom-client-app-registration). |
 
-Implication: the `Mutator` protocol in `scripts/register.py` and most of
-the planner/applier scripts (`register.py`, `blueprint_create.py`,
-`instance_create.py`, `deploy.py`, `fic_rotate.py`, `cleanup.py`) target
-subcommands that don't exist. A v0.2 redesign is required to drive the
-real CLI; see SPEC.md `## 14.1 Risks` row "Hermes harness API drift" for
-the change-management posture, and the new redesign-tracking issue
-(filed separately).
+Implication: the v0.1 `Mutator` protocol and most of the v0.1 planner /
+applier scripts targeted subcommands that don't exist. The v0.2 rebuild
+shipped in this repo drives the real CLI; see
+[`docs/historical/SPEC-v0.1-draft.md`](../docs/historical/SPEC-v0.1-draft.md)
+`## 14.1 Risks` row "Hermes harness API drift" for the change-management
+posture that anticipated this scenario.
 
 ---
 

@@ -1,21 +1,32 @@
-# `hermes-a365` — Skill Specification
+# `hermes-a365` — Skill Specification (v0.1 design draft)
 
-**Status:** Draft v1 — 2026-05-03 (v0.2 reality-check annotations 2026-05-07)
+> **Historical draft — do not use as a current spec.** This file is
+> the original v0.1 design draft (2026-05-03). v0.1 targeted a
+> speculative CLI surface that diverged from what Microsoft shipped
+> at GA, so it was scrapped 2026-05-04 and v0.2 was rebuilt against
+> the real `a365` (.NET) CLI. The activity bridge has since landed as
+> a Hermes gateway platform plugin (resolves §10 Q1 below). Inline
+> **v0.2 update** banners appear on sections that are obsolete,
+> renamed, or never shipped.
+>
+> **For the current state of the skill, use these instead:**
+>
+> - [`../../README.md`](../../README.md) — current subcommand
+>   inventory, status, open-work tracks.
+> - [`../../CHANGELOG.md`](../../CHANGELOG.md) — what shipped in each tag.
+> - [`../../references/live-tenant-test.md`](../../references/live-tenant-test.md)
+>   — operator runbook (walked rounds 1–6).
+> - [`../../references/m365-surface-coverage.md`](../../references/m365-surface-coverage.md)
+>   — adapter coverage matrix per M365 surface.
+> - [`../../plugins/agent365/`](../../plugins/agent365/) — the gateway
+>   plugin shape that resolved §10 Q1.
+>
+> Kept here for design-rationale archaeology. A full v2 rewrite is
+> not planned — README + references are the de-facto current spec.
+
 **Author:** Sadiq Jaffer (drafted with Claude)
 **Target:** Hermes Agent harness (`~/.hermes/hermes-agent/`)
 **Source repo:** <https://github.com/satscryption/Hermes-A365>
-**Replaces / parallels:** the existing OpenClaw integration with Microsoft Agent 365 (the `SidU/openclaw-a365` Bot Framework channel plugin and surrounding tooling)
-
-> **Repo split note.** This spec, the reference material under `references/`, the prototype scripts under `scripts/`, and the templates under `templates/` are developed in the standalone repo `satscryption/Hermes-A365` so design and iteration can move at their own cadence. The final `SKILL.md` is **contributed upstream** to `hermes-agent/optional-skills/cloud-platforms/hermes-a365/SKILL.md` (see §3.1) and pulls in the artefacts from this repo at upstream-contribution time. Until that happens, this repo is the authoritative working tree.
-
-> **v0.2 reality-check (2026-05-07).** This document is the original v0.1 design draft. v0.1 was scrapped 2026-05-04 because it targeted a speculative CLI surface that diverged from what Microsoft shipped at GA. v0.2 was rebuilt against the real `a365` (.NET) CLI v1.1.171, and the activity bridge has since become a Hermes gateway platform plugin (§10 Q1 resolution). The sections below carry inline **v0.2 update** banners on the parts that are obsolete, renamed, or never shipped. For the **current** state of the wrapper (subcommands actually implemented, plugin layout, runbook, open issues), the authoritative sources are now:
->
-> - **`README.md`** — current subcommand inventory, status, open-work tracks
-> - **`references/live-tenant-test.md`** — the §9 walkthrough as actually walked through five rounds against satscryption.io
-> - **`references/m365-surface-coverage.md`** — adapter coverage matrix per M365 surface
-> - **`plugins/agent365/`** — the gateway plugin shape (closed #1)
->
-> A full v2 rewrite is deferred; treat this draft as **historical with annotations** rather than an authoritative design doc.
 
 ---
 

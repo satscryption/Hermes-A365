@@ -1,7 +1,7 @@
 """Reconcile desired vs actual Entra app registration state.
 
-Spec: SPEC.md §6.2. Used by the (TODO) ``register`` command to produce
-idempotent plans: same desired-and-actual = ``noop``; differences = ``patch``;
+Used by the ``register`` command to produce idempotent plans: same
+desired-and-actual = ``noop``; differences = ``patch``;
 no actual state at all = ``create``; a tier or app-id mismatch on the same
 display name = ``abort`` (refuse to silently mutate someone else's app).
 

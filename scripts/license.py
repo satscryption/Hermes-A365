@@ -1,7 +1,7 @@
 """hermes a365 license — license-model recommendation.
 
-Spec: SPEC.md §6.1. Read-only; never purchases. Inputs are user count,
-agent count, current M365 plan, and (optionally) whether the operator
+Read-only; never purchases. Inputs are user count, agent count, current
+M365 plan, and (optionally) whether the operator
 wants the bundled Copilot+Defender+Purview offering. Output is a
 recommendation (``per_agent`` add-on or ``e7``), the rationale, monthly
 and annual cost estimates, and a link to the admin-center catalog where

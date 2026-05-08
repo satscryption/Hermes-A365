@@ -1,7 +1,7 @@
 """scripts/emit_card.py — build Adaptive Card v1.6 payloads.
 
-Spec: SPEC.md §6.7. Renders one of three Adaptive Card templates
-(``greeting`` / ``confirmation`` / ``error``) for the activity bridge to post
+Renders one of three Adaptive Card templates (``greeting`` /
+``confirmation`` / ``error``) for the activity bridge to post
 back to A365 channels (Teams, Outlook, M365 Copilot) when responding to
 ``message`` or ``invoke`` (``adaptiveCard/action``) activities.
 

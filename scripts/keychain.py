@@ -1,8 +1,10 @@
 """hermes a365 secrets — OS-keychain wrapper for the T2 client secret.
 
-Spec: SPEC.md §6.2, §6.5, §6.7, §7.1. The skill stores the T2 confidential-
-client secret in the OS keychain under service ``hermes-a365`` with account
-``<tenant>.<appId>``. The secret is **never** written to disk.
+Stores the agent blueprint client secret in the OS keychain under
+service ``hermes-a365`` with account ``<tenant>.<appId>``. The secret
+is **never** written to disk on a platform where the keychain backend
+is available; on macOS / Linux the GA CLI may also leave a copy in
+``a365.generated.config.json`` (DPAPI is Windows-only).
 
 Backends
 --------
