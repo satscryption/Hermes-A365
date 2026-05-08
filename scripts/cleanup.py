@@ -479,10 +479,11 @@ def _parse_kinds(value: str | None) -> tuple[CleanupKind, ...]:
     return tuple(parts)  # type: ignore[return-value]
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="hermes a365 cleanup — destructive teardown of an A365 agent.",
-    )
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            description="hermes a365 cleanup — destructive teardown of an A365 agent.",
+        )
     parser.add_argument("--agent-name", required=True, help="agent base name")
     parser.add_argument(
         "--tenant-id",
@@ -536,8 +537,10 @@ def main(argv: list[str] | None = None) -> int:
             "`--purge-orphans` to issue the Graph DELETE."
         ),
     )
-    args = parser.parse_args(argv)
+    return parser
 
+
+def run(args: argparse.Namespace) -> int:
     try:
         kinds = _parse_kinds(args.kinds)
         inputs = CleanupInputs(
@@ -587,6 +590,10 @@ def main(argv: list[str] | None = None) -> int:
     if result.orphans_remaining or result.orphan_instances_remaining:
         return 1
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":

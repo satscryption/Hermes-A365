@@ -394,21 +394,28 @@ def render_json(report: DoctorReport) -> str:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="hermes a365 doctor — read-only environment probe.",
-    )
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            description="hermes a365 doctor — read-only environment probe.",
+        )
     parser.add_argument("--human", action="store_true", help="formatted output for terminals")
     parser.add_argument(
         "--no-network",
         action="store_true",
         help="skip network reachability probes (offline diagnostic)",
     )
-    args = parser.parse_args(argv)
+    return parser
 
+
+def run(args: argparse.Namespace) -> int:
     report = run_all_probes(no_network=args.no_network)
     sys.stdout.write(render_human(report) if args.human else render_json(report))
     return overall_to_exit_code(report.overall)
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":

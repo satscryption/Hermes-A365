@@ -202,10 +202,11 @@ def apply_publish_plan(
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="hermes a365 publish — package the agent manifest for admin-centre upload.",
-    )
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            description="hermes a365 publish — package the agent manifest for admin-centre upload.",
+        )
     parser.add_argument("--agent-name", required=True, help="agent base name")
     parser.add_argument(
         "--tenant-id",
@@ -223,8 +224,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--apply", action="store_true", help="execute the plan; default is dry-run")
-    args = parser.parse_args(argv)
+    return parser
 
+
+def run(args: argparse.Namespace) -> int:
     try:
         inputs = PublishInputs(
             agent_name=args.agent_name,
@@ -255,6 +258,10 @@ def main(argv: list[str] | None = None) -> int:
 
     sys.stdout.write("\n" + "\n".join(result.messages) + "\ndone.\n")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":

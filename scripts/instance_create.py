@@ -268,10 +268,11 @@ def apply_instance_plan(plan: InstancePlan) -> InstanceCreateResult:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="hermes a365 instance create — write the per-agent runtime .env file.",
-    )
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            description="hermes a365 instance create — write the per-agent runtime .env file.",
+        )
     parser.add_argument("slug", help="agent slug (also the agent-name passed to `a365 setup`)")
     parser.add_argument("--owner", required=True, help="owner email")
     parser.add_argument("--owner-aad-id", required=True, help="owner Entra (AAD) object id")
@@ -285,8 +286,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--apply", action="store_true", help="execute the file write; default is dry-run"
     )
-    args = parser.parse_args(argv)
+    return parser
 
+
+def run(args: argparse.Namespace) -> int:
     try:
         inputs = InstanceCreateInputs(
             slug=args.slug,
@@ -316,6 +319,10 @@ def main(argv: list[str] | None = None) -> int:
     result = apply_instance_plan(plan)
     sys.stdout.write("\n" + "\n".join(result.messages) + "\ndone.\n")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":

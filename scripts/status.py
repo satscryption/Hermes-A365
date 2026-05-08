@@ -529,10 +529,11 @@ def render_json(report: StatusReport) -> str:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="hermes a365 status — per-component status report.",
-    )
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            description="hermes a365 status — per-component status report.",
+        )
     parser.add_argument(
         "agent_name",
         nargs="?",
@@ -540,11 +541,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--tenant-id", help="override tenant id used for cloud reads")
     parser.add_argument("--human", action="store_true", help="markdown-aligned output")
-    args = parser.parse_args(argv)
+    return parser
 
+
+def run(args: argparse.Namespace) -> int:
     report = collect_status(args.agent_name, tenant_id=args.tenant_id)
     sys.stdout.write(render_human(report) if args.human else render_json(report))
     return overall_to_exit_code(report.overall)
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":

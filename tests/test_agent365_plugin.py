@@ -160,12 +160,16 @@ class _FakeCtx:
     def __init__(self) -> None:
         self.platforms: list[dict[str, Any]] = []
         self.tools: list[dict[str, Any]] = []
+        self.cli_commands: list[dict[str, Any]] = []
 
     def register_platform(self, **kwargs: Any) -> None:
         self.platforms.append(kwargs)
 
     def register_tool(self, **kwargs: Any) -> None:
         self.tools.append(kwargs)
+
+    def register_cli_command(self, **kwargs: Any) -> None:
+        self.cli_commands.append(kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +238,12 @@ class TestPluginManifest:
             "PLUGIN.yaml re-introduced — harness loader globs for lowercase"
         )
 
-    def test_init_reexports_register(self) -> None:
-        assert hasattr(agent365, "register")
-        assert agent365.register is adapter_mod.register
+    def test_init_register_is_a_wrapper(self) -> None:
+        # Slice 19x-a: __init__.register is now a wrapper that calls
+        # both adapter.register AND register_cli_command, so it is no
+        # longer the same object as adapter_mod.register.
+        assert callable(agent365.register)
+        assert agent365.register is not adapter_mod.register
 
 
 class TestRegister:
@@ -1115,3 +1122,254 @@ class TestSendImage:
         result = await a.send_image("missing", "https://example.test/x.png")
         assert result.success is False
         assert "no cached inbound" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Slice 19x-a — `hermes a365 <verb>` CLI surface via plugin
+# ---------------------------------------------------------------------------
+
+
+cli_mod = importlib.import_module("plugins.agent365.cli")
+
+
+def _build_a365_parser():
+    """Build a top-level parser with `register_cli` attached as the
+    `a365` subparser. Mirrors what the Hermes harness does at load
+    time when the plugin's `register_cli_command` callback fires."""
+    import argparse
+
+    parent = argparse.ArgumentParser(prog="hermes")
+    subs = parent.add_subparsers(dest="cmd")
+    a365_p = subs.add_parser("a365")
+    cli_mod.register_cli(a365_p)
+    return parent
+
+
+class TestPluginRegisterCli:
+    def test_register_calls_ctx_register_cli_command(self) -> None:
+        ctx = _FakeCtx()
+        agent365.register(ctx)
+        # Both surfaces wired: platform adapter + CLI subcommand.
+        assert len(ctx.platforms) == 1
+        assert ctx.platforms[0]["name"] == "agent365"
+        assert len(ctx.cli_commands) == 1
+        cli = ctx.cli_commands[0]
+        assert cli["name"] == "a365"
+        assert callable(cli["setup_fn"])
+        assert callable(cli["handler_fn"])
+        assert cli["setup_fn"] is cli_mod.register_cli
+        assert cli["handler_fn"] is cli_mod.a365_command
+
+
+class TestRegisterCliParserShape:
+    """`hermes a365 <verb> --help` must parse for every documented verb.
+
+    Each script's `build_parser` is supposed to attach to the
+    subparser we hand it; if any verb's wiring breaks, argparse will
+    SystemExit with code 0 from --help (proving the parser was built)
+    or 2 (proving the verb is missing). We catch SystemExit and
+    inspect the code.
+    """
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["a365", "doctor", "--help"],
+            ["a365", "license", "--help"],
+            ["a365", "register", "--help"],
+            ["a365", "consent", "--help"],
+            ["a365", "instance", "create", "--help"],
+            ["a365", "publish", "--help"],
+            ["a365", "status", "--help"],
+            ["a365", "cleanup", "--help"],
+            ["a365", "activity-bridge", "--help"],
+            ["a365", "activity-bridge", "verify", "--help"],
+            ["a365", "activity-bridge", "serve", "--help"],
+            ["a365", "activity-bridge", "update-endpoint", "--help"],
+        ],
+    )
+    def test_help_parses_for_each_verb(
+        self, argv: list[str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        parser = _build_a365_parser()
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(argv)
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        # Each --help dump should at least mention `usage:`.
+        assert "usage:" in out
+
+
+class TestRegisterCliDispatch:
+    """Spot-check that `hermes a365 <verb> ...` routes through to the
+    matching script's `run` function with a Namespace shaped the way
+    that script expects."""
+
+    def test_doctor_dispatch_routes_to_doctor_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import doctor as _doctor
+
+        captured: dict[str, Any] = {}
+
+        def _fake_run(args):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(_doctor, "run", _fake_run)
+        parser = _build_a365_parser()
+        ns = parser.parse_args(["a365", "doctor", "--human"])
+        rc = cli_mod.a365_command(ns)
+        assert rc == 0
+        assert captured["args"].human is True
+        assert captured["args"].no_network is False
+
+    def test_status_dispatch_carries_agent_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import status as _status
+
+        captured: dict[str, Any] = {}
+
+        def _fake_run(args):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(_status, "run", _fake_run)
+        parser = _build_a365_parser()
+        ns = parser.parse_args(["a365", "status", "inbox-helper", "--human"])
+        rc = cli_mod.a365_command(ns)
+        assert rc == 0
+        assert captured["args"].agent_name == "inbox-helper"
+        assert captured["args"].human is True
+
+    def test_cleanup_dispatch_carries_required_flags(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import cleanup as _cleanup
+
+        captured: dict[str, Any] = {}
+
+        def _fake_run(args):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(_cleanup, "run", _fake_run)
+        parser = _build_a365_parser()
+        ns = parser.parse_args(
+            [
+                "a365",
+                "cleanup",
+                "--agent-name",
+                "foo",
+                "--purge-orphans",
+                "--orphan-instance-id",
+                "11111111-1111-1111-1111-111111111111",
+            ]
+        )
+        rc = cli_mod.a365_command(ns)
+        assert rc == 0
+        assert captured["args"].agent_name == "foo"
+        assert captured["args"].purge_orphans is True
+        assert captured["args"].orphan_instance_id == [
+            "11111111-1111-1111-1111-111111111111"
+        ]
+
+    def test_register_dispatch_carries_apply_and_recover_flags(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import register as _register
+
+        captured: dict[str, Any] = {}
+
+        def _fake_run(args):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(_register, "run", _fake_run)
+        parser = _build_a365_parser()
+        ns = parser.parse_args(
+            [
+                "a365",
+                "register",
+                "--agent-name",
+                "Hermes Inbox Helper",
+                "--apply",
+                "--auto-recover-secret",
+            ]
+        )
+        rc = cli_mod.a365_command(ns)
+        assert rc == 0
+        assert captured["args"].agent_name == "Hermes Inbox Helper"
+        assert captured["args"].apply is True
+        assert captured["args"].auto_recover_secret is True
+
+    def test_instance_create_dispatch_routes_to_instance_create_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import instance_create as _instance_create
+
+        captured: dict[str, Any] = {}
+
+        def _fake_run(args):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(_instance_create, "run", _fake_run)
+        parser = _build_a365_parser()
+        ns = parser.parse_args(
+            [
+                "a365",
+                "instance",
+                "create",
+                "inbox-helper",
+                "--owner",
+                "x@y.z",
+                "--owner-aad-id",
+                "11111111-1111-1111-1111-111111111111",
+            ]
+        )
+        rc = cli_mod.a365_command(ns)
+        assert rc == 0
+        assert captured["args"].slug == "inbox-helper"
+        assert captured["args"].owner == "x@y.z"
+
+    def test_activity_bridge_verify_routes_to_bridge_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import activity_bridge as _activity_bridge
+
+        captured: dict[str, Any] = {}
+
+        def _fake_run(args):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(_activity_bridge, "run", _fake_run)
+        parser = _build_a365_parser()
+        ns = parser.parse_args(
+            ["a365", "activity-bridge", "verify", "--slug", "inbox-helper"]
+        )
+        rc = cli_mod.a365_command(ns)
+        assert rc == 0
+        assert captured["args"].cmd == "verify"
+        assert captured["args"].slug == "inbox-helper"
+
+    def test_unknown_verb_returns_2(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # No subcommand at all → usage + 2.
+        ns_empty = type("NS", (), {})()
+        rc = cli_mod.a365_command(ns_empty)  # type: ignore[arg-type]
+        assert rc == 2
+        out = capsys.readouterr().out
+        assert "usage:" in out
+
+    def test_instance_with_no_subcommand_returns_2(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        parser = _build_a365_parser()
+        ns = parser.parse_args(["a365", "instance"])
+        rc = cli_mod.a365_command(ns)
+        assert rc == 2
+        assert "instance" in capsys.readouterr().out

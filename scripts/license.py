@@ -176,10 +176,11 @@ def render_human(inputs: LicenseInputs, rec: LicenseRecommendation) -> str:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Recommend an A365 license model. Read-only; never purchases.",
-    )
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            description="Recommend an A365 license model. Read-only; never purchases.",
+        )
     parser.add_argument("--users", type=int, required=True)
     parser.add_argument("--agents", type=int, required=True)
     parser.add_argument("--plan", required=True, choices=sorted(PLAN_TIERS))
@@ -188,8 +189,10 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="user wants Copilot+Defender+Purview bundled (favours E7)",
     )
-    args = parser.parse_args(argv)
+    return parser
 
+
+def run(args: argparse.Namespace) -> int:
     try:
         inputs = LicenseInputs(
             users=args.users,
@@ -204,6 +207,10 @@ def main(argv: list[str] | None = None) -> int:
 
     sys.stdout.write(render_human(inputs, rec))
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":

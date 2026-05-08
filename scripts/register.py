@@ -523,13 +523,14 @@ def report_missing_secret_warning(
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description=(
-            "hermes a365 register — orchestrate `a365 setup blueprint` "
-            "+ `setup permissions mcp` + `setup permissions bot`."
-        ),
-    )
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            description=(
+                "hermes a365 register — orchestrate `a365 setup blueprint` "
+                "+ `setup permissions mcp` + `setup permissions bot`."
+            ),
+        )
     parser.add_argument(
         "--agent-name",
         required=True,
@@ -602,8 +603,10 @@ def main(argv: list[str] | None = None) -> int:
             "the flag the wrapper just prints a paste-ready hint."
         ),
     )
-    args = parser.parse_args(argv)
+    return parser
 
+
+def run(args: argparse.Namespace) -> int:
     try:
         inputs = RegisterInputs(
             agent_name=args.agent_name,
@@ -674,6 +677,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     sys.stdout.write("\ndone. Next: `hermes a365 publish` to package the manifest.\n")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":

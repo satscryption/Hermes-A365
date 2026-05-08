@@ -636,10 +636,11 @@ def _overall_to_exit_code(overall: ProbeState) -> int:
     return {_OK: 0, _WARN: 1, _ERROR: 2}[overall]
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="hermes a365 activity-bridge — Bot Framework adapter daemon.",
-    )
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            description="hermes a365 activity-bridge — Bot Framework adapter daemon.",
+        )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     verify = sub.add_parser(
@@ -707,8 +708,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     update_ep.add_argument("--apply", action="store_true")
 
-    args = parser.parse_args(argv)
+    return parser
 
+
+def run(args: argparse.Namespace) -> int:
     if args.cmd == "verify":
         try:
             report = run_verify(
@@ -729,8 +732,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "update-endpoint":
         return cmd_update_endpoint(args)
 
-    parser.error(f"unknown command: {args.cmd}")
-    return 2  # unreachable; argparse exits
+    print(f"ERROR: unknown command: {args.cmd}", file=sys.stderr)
+    return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(build_parser().parse_args(argv))
 
 
 # ===========================================================================

@@ -150,10 +150,11 @@ def poll_for_consent(
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="hermes a365 consent — render admin-consent URL and poll for grant.",
-    )
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            description="hermes a365 consent — render admin-consent URL and poll for grant.",
+        )
     parser.add_argument(
         "agent_name",
         nargs="?",
@@ -185,8 +186,10 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_POLL_INTERVAL_SECONDS,
         help="poll interval in seconds (default 5)",
     )
-    args = parser.parse_args(argv)
+    return parser
 
+
+def run(args: argparse.Namespace) -> int:
     try:
         tenant, app_id = load_tenant_and_app()
     except (FileNotFoundError, KeyError) as e:
@@ -248,6 +251,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     sys.stdout.write("Consent NOT granted within timeout. Re-run when ready.\n")
     return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":
