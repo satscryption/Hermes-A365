@@ -650,11 +650,40 @@ The plugin imports `hermes_a365.activity_bridge` directly — no
 sys.path tricks, no symlinks. Edits to the package land immediately
 under `pip install -e`; otherwise reinstall after every change.
 
-### 9d.2 — Wire the platform into Hermes config.yaml
+### 9d.2 — Wire the platform via the setup wizard
 
-Add the platform block to `~/.hermes/config.yaml`:
+```bash
+hermes gateway setup --platform agent365
+```
+
+The wizard (slice 19r-a..b, shipped in v0.2.0) walks the operator
+through:
+
+- Path to `a365.generated.config.json` (default `~/a365.generated.config.json`).
+- Tenant id (default from `az account show`).
+- Blueprint Entra app id (default from the generated config; drift-warns
+  if `~/.hermes/.env::A365_APP_ID` is stale).
+- Agent slug (default to the single per-agent dir, or pick from the list).
+- Bridge port (default 3978).
+- Client secret bootstrap (reads from generated config; flags
+  Microsoft#408 if it's null).
+- Allow-all toggle (testing) vs `A365_ALLOWED_USERS=<csv>` (production).
+
+The wizard patches `~/.hermes/.env` (env vars) and `~/.hermes/config.yaml`
+(`plugins.enabled` + `gateway.platforms.agent365` block) atomically.
+Re-runnable: detects existing values and offers update-vs-keep. A
+drift-detection pass runs first — surfaces stale `A365_APP_ID`,
+orphan slugs, missing `tenantId`/`clientAppId` in `~/a365.config.json`,
+or unreachable `generated_config_path`, with auto-fixers where
+possible.
+
+If you'd rather hand-edit (e.g. for one-off automation), the resulting
+config.yaml block is:
 
 ```yaml
+plugins:
+  enabled:
+    - agent365
 gateway:
   platforms:
     agent365:
@@ -663,18 +692,12 @@ gateway:
         slug: inbox-helper
         port: 3978
         host: 127.0.0.1
-        # blueprint_client_secret read from env or generated config:
-        # generated_config_path: /Users/<you>/satscryption/Hermes-A365/a365.generated.config.json
+        generated_config_path: /Users/<you>/a365.generated.config.json
 ```
 
-The plugin reads `A365_TENANT_ID`, `A365_APP_ID`, and
-`A365_BLUEPRINT_CLIENT_SECRET` from env (env wins over `extra`).
-The wrapper's `register --apply` + `instance create --apply` flow
-already populates `~/.hermes/.env` and the per-agent `.env` with
-these. If the secret isn't in env, the plugin falls back to
-reading `agentBlueprintClientSecret` from the generated config
-path (defaulting to cwd, or the `extra.generated_config_path`
-override).
+…paired with `A365_TENANT_ID`, `A365_APP_ID`, `A365_BLUEPRINT_CLIENT_SECRET`,
+and either `A365_ALLOW_ALL_USERS=true` or `A365_ALLOWED_USERS=<csv>`
+in `~/.hermes/.env`.
 
 ### 9d.3 — Start the Hermes gateway
 
@@ -682,8 +705,7 @@ override).
 hermes gateway run
 ```
 
-(Or whatever the canonical run command is in your harness install
-— check `hermes --help`.) The gateway should:
+The gateway should:
 
 1. Discover the plugin via the `hermes_agent.plugins` entry-point scan.
 2. Call `register(ctx)` → `ctx.register_platform(name="agent365", …)`.

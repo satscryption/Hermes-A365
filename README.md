@@ -324,50 +324,56 @@ hermes a365 cleanup --agent-name "Inbox Helper" \
 
 After the gateway-plugin pip install above (`~/.hermes/hermes-agent/venv/bin/pip
 install 'hermes-a365[bridge]'`), the plugin is auto-discovered via its
-`hermes_agent.plugins` entry point. Until `hermes gateway setup`'s wizard
-ships ([#13](https://github.com/satscryption/Hermes-A365/issues/13)), two
-manual config edits are still needed before `hermes gateway run` will route
-inbound activities at the adapter:
-
-**1. Configure the gateway in `~/.hermes/config.yaml`.** Add the
-plugin to `plugins.enabled` and a `gateway.platforms.agent365` block
-that points at the per-agent `.env` `instance create` writes:
-
-```yaml
-plugins:
-  enabled:
-    - agent365
-
-gateway:
-  platforms:
-    agent365:
-      enabled: true
-      extra:
-        slug: inbox-helper
-        port: 3978
-        host: 127.0.0.1
-        # Path the adapter reads to pick up the blueprint client secret
-        # when neither the env var nor a keychain entry is available.
-        generated_config_path: /absolute/path/to/Hermes-A365/a365.generated.config.json
-```
-
-**2. Make the runtime env vars visible to the gateway.** Source the
-per-agent `.env` into the gateway's process shell so the adapter
-inherits `A365_TENANT_ID`, `A365_APP_ID`, and `AA_INSTANCE_ID`. The
-per-agent `.env` does **not** carry the secret, so export
-`A365_BLUEPRINT_CLIENT_SECRET` separately:
+`hermes_agent.plugins` entry point. Run the setup wizard to wire the
+platform into Hermes:
 
 ```bash
-set -a; . ~/.hermes/agents/inbox-helper/.env; set +a
-export A365_BLUEPRINT_CLIENT_SECRET="$(cat ~/.hermes-secrets/inbox-helper.txt)"
-# For testing, allow all signed-in users to reach the agent. Real
-# operators should set A365_ALLOWED_USERS=<csv-of-emails> instead.
-export A365_ALLOW_ALL_USERS=true
+hermes gateway setup --platform agent365
 ```
 
-After both edits, `hermes gateway run` should load `agent365`
-during plugin discovery and surface it in `hermes a365 status
-<slug>`'s `activity_bridge` row as `ok`.
+The wizard (shipped in v0.2.0) prompts through the generated-config
+path, tenant id, blueprint app id, slug, port, secret bootstrap, and
+allow-all toggle. It patches `~/.hermes/.env` (env vars) and
+`~/.hermes/config.yaml` (`plugins.enabled` + `gateway.platforms.agent365`
+block) and is fully idempotent — re-running detects existing values,
+offers update-vs-keep, and surfaces drift (stale `A365_APP_ID`, orphan
+slugs, missing `tenantId`/`clientAppId` in `~/a365.config.json`,
+unreachable `generated_config_path`) with auto-fixers where possible.
+
+After the wizard, source the per-agent .env into the gateway's process
+shell so the adapter inherits the runtime config, then start the
+gateway:
+
+```bash
+set -a; . ~/.hermes/agents/<slug>/.env; set +a
+hermes gateway run
+```
+
+`hermes a365 status <slug>` should now show the `activity_bridge` row
+as `ok`.
+
+> **Hand-edit fallback.** If you need to script the setup non-interactively
+> (CI seed scripts, configuration management), the resulting
+> `~/.hermes/config.yaml` block is:
+>
+> ```yaml
+> plugins:
+>   enabled:
+>     - agent365
+> gateway:
+>   platforms:
+>     agent365:
+>       enabled: true
+>       extra:
+>         slug: inbox-helper
+>         port: 3978
+>         host: 127.0.0.1
+>         generated_config_path: /Users/<you>/a365.generated.config.json
+> ```
+>
+> …paired with `A365_TENANT_ID`, `A365_APP_ID`, `A365_BLUEPRINT_CLIENT_SECRET`,
+> and either `A365_ALLOW_ALL_USERS=true` (testing) or `A365_ALLOWED_USERS=<csv>`
+> (production) in `~/.hermes/.env`.
 
 ## Subcommand reference
 

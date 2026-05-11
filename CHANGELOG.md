@@ -6,6 +6,75 @@ follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-11
+
+First feature release after the v0.1 PyPI series. Closes #13 (setup
+wizard) end-to-end. Operators on a fresh tenant can now go from
+`pip install hermes-a365` to a running gateway-connected bot with no
+hand-edits to `~/.hermes/config.yaml` or `~/.hermes/.env`, and the
+emitted manifest zip is always Admin-Centre-upload-ready.
+
+### Added — `hermes gateway setup --platform agent365` wizard
+
+- **Slice 19r-a:** `interactive_setup()` in
+  `hermes_a365.plugin.adapter`, wired via `setup_fn=` in
+  `ctx.register_platform(...)`. Walks the operator through generated
+  config path → tenant id → blueprint app id → slug → bridge port →
+  client-secret bootstrap → allow-all toggle, then patches
+  `~/.hermes/.env` and `~/.hermes/config.yaml`. Idempotent —
+  re-running detects existing values and offers update-vs-keep.
+  Available out of the box once the plugin is installed (Hermes
+  v0.13.0+ required for the `register_cli_command` wiring).
+- **Slice 19r-b:** `_detect_drift()` runs first when the wizard is
+  invoked. Surfaces four scenarios from the round-8 walkthrough:
+  - `app_id_stale` — operator `.env::A365_APP_ID` diverges from
+    `agentBlueprintId` in the generated config.
+  - `slug_orphan` — config.yaml stanza references a slug that
+    doesn't exist under `~/.hermes/agents/`.
+  - `a365_config_empty` — `~/a365.config.json` exists with empty
+    `tenantId` / `clientAppId`; auto-fixer reseeds with the
+    well-known `Agent 365 CLI` GUID + `az account show` tenant.
+  - `generated_config_missing` / `generated_config_blank` —
+    config.yaml's `generated_config_path` is unreachable or has an
+    empty `agentBlueprintId`.
+
+### Fixed — manifest emission
+
+- **Slice 19r-c:** `hermes a365 publish --apply` now auto-truncates
+  `manifest.json::name.short` to ≤30 chars before re-zipping.
+  Strategy: drop trailing " Blueprint" if present; else truncate at
+  the last word boundary that fits. GA CLI 1.1.174 emits 32-char
+  `name.short` whenever the agent-name has the " Blueprint" suffix —
+  Admin Centre rejected the upload at validation time, surfacing a
+  generic "Upload failed" toast that round-8 spent two retries
+  diagnosing. The wrapper now emits a `[applied] truncated
+  name.short: 'X' (32) → 'Y' (22)` line when a patch was applied.
+
+### Changed — documentation
+
+- **Slice 19r-d:** `references/live-tenant-test.md` §9d.2 + §9d.3
+  collapse to a single `hermes gateway setup --platform agent365`
+  callout. README "Operator setup" section rewritten to lead with
+  the wizard; manual-edit YAML preserved as a hand-edit fallback for
+  CI / automation use cases.
+
+### Tested
+
+- 650 tests pass against both editable install and built wheel.
+- Live-validated against `satscryption.io` (round-8 install): wizard
+  fires from `hermes gateway setup`, detects 0 drift on a clean R8
+  setup, correctly flags synthetic drift; publish auto-truncates the
+  R8 manifest from 32 to 22 chars; Teams round-trip continues to
+  work end-to-end.
+
+### Upstream
+
+- Filed NousResearch/hermes-agent#23802 — `hermes plugins
+  enable/list` filters out entry-point-discovered plugins. The
+  wizard works around this via the internal
+  `hermes_cli.plugins_cmd._save_enabled_set` helper; the slice
+  comment in `adapter.py` points at the upstream fix.
+
 ## [0.1.2] — 2026-05-11
 
 Cosmetic patch surfaced by the first round-7 read-only walkthrough
