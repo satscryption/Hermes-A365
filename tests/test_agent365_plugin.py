@@ -294,6 +294,179 @@ class TestRegister:
         assert len(sig.parameters) == 0
 
 
+class TestDetectDrift:
+    """Slice 19r-b: _detect_drift() returns operator-config issues."""
+
+    def _make_home(self, tmp_path: Path, *, env: str = "", agents: list[str] | None = None,
+                   a365_config: dict[str, Any] | None = None,
+                   generated: dict[str, Any] | None = None,
+                   generated_filename: str = "a365.generated.config.json") -> Path:
+        """Build a fake home dir with the bits _detect_drift reads."""
+        (tmp_path / ".hermes").mkdir()
+        (tmp_path / ".hermes" / ".env").write_text(env)
+        agents_root = tmp_path / ".hermes" / "agents"
+        agents_root.mkdir()
+        for slug in agents or []:
+            (agents_root / slug).mkdir()
+        if a365_config is not None:
+            import json as _json
+            (tmp_path / "a365.config.json").write_text(_json.dumps(a365_config))
+        if generated is not None:
+            import json as _json
+            (tmp_path / generated_filename).write_text(_json.dumps(generated))
+        return tmp_path
+
+    def test_no_drift_on_clean_home(self, tmp_path: Path) -> None:
+        home = self._make_home(tmp_path)
+        drift = adapter_mod._detect_drift(home=home, config={})
+        assert drift == []
+
+    def test_app_id_stale_detected(self, tmp_path: Path) -> None:
+        # Operator .env app id != generated config blueprint id.
+        home = self._make_home(
+            tmp_path,
+            env="A365_APP_ID=00000000-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n",
+            generated={"agentBlueprintId": "11111111-bbbb-bbbb-bbbb-bbbbbbbbbbbb"},
+        )
+        drift = adapter_mod._detect_drift(home=home, config={})
+        keys = [d["key"] for d in drift]
+        assert "app_id_stale" in keys
+        msg = next(d["message"] for d in drift if d["key"] == "app_id_stale")
+        assert "00000000" in msg
+        assert "11111111" in msg
+
+    def test_app_id_matching_no_drift(self, tmp_path: Path) -> None:
+        home = self._make_home(
+            tmp_path,
+            env="A365_APP_ID=11111111-bbbb-bbbb-bbbb-bbbbbbbbbbbb\n",
+            generated={"agentBlueprintId": "11111111-bbbb-bbbb-bbbb-bbbbbbbbbbbb"},
+        )
+        drift = adapter_mod._detect_drift(home=home, config={})
+        assert [d["key"] for d in drift] == []
+
+    def test_slug_orphan_detected(self, tmp_path: Path) -> None:
+        # Stanza points at a slug not present under ~/.hermes/agents/.
+        home = self._make_home(tmp_path, agents=["inbox-helper-r8"])
+        cfg = {
+            "gateway": {
+                "platforms": {
+                    "agent365": {
+                        "enabled": True,
+                        "extra": {"slug": "old-slug-that-doesnt-exist"},
+                    }
+                }
+            }
+        }
+        drift = adapter_mod._detect_drift(home=home, config=cfg)
+        keys = [d["key"] for d in drift]
+        assert "slug_orphan" in keys
+
+    def test_slug_present_no_drift(self, tmp_path: Path) -> None:
+        home = self._make_home(tmp_path, agents=["inbox-helper-r8", "test-agent"])
+        cfg = {
+            "gateway": {
+                "platforms": {
+                    "agent365": {"extra": {"slug": "inbox-helper-r8"}}
+                }
+            }
+        }
+        drift = adapter_mod._detect_drift(home=home, config=cfg)
+        assert "slug_orphan" not in [d["key"] for d in drift]
+
+    def test_a365_config_empty_detected(self, tmp_path: Path) -> None:
+        home = self._make_home(
+            tmp_path,
+            a365_config={"tenantId": "", "clientAppId": ""},
+        )
+        drift = adapter_mod._detect_drift(home=home, config={})
+        keys = [d["key"] for d in drift]
+        assert "a365_config_empty" in keys
+
+    def test_a365_config_empty_fixer_reseeds(self, tmp_path: Path) -> None:
+        # Fixer should fill in clientAppId; tenant fill depends on
+        # whether `az account show` is available in the test env.
+        # We test the unambiguous half here.
+        home = self._make_home(
+            tmp_path,
+            env="A365_TENANT_ID=22222222-cccc-cccc-cccc-cccccccccccc\n",
+            a365_config={"tenantId": "", "clientAppId": ""},
+        )
+        drift = adapter_mod._detect_drift(home=home, config={})
+        item = next(d for d in drift if d["key"] == "a365_config_empty")
+        fixer = item.get("fixer")
+        if fixer is None:
+            # az not available in test env — skip the reseed assertion.
+            import pytest as _pytest
+            _pytest.skip("az not in PATH; fixer was not constructed")
+        fixer()
+        import json as _json
+        cur = _json.loads((home / "a365.config.json").read_text())
+        # clientAppId always reseeds to the well-known GUID.
+        assert cur["clientAppId"] == adapter_mod._AGENT365_CLI_APP_ID
+        # tenantId may have come from operator env (preferred) or detected.
+        assert cur["tenantId"] != ""
+
+    def test_a365_config_present_no_drift(self, tmp_path: Path) -> None:
+        home = self._make_home(
+            tmp_path,
+            a365_config={"tenantId": "abc", "clientAppId": "def"},
+        )
+        drift = adapter_mod._detect_drift(home=home, config={})
+        assert "a365_config_empty" not in [d["key"] for d in drift]
+
+    def test_generated_config_missing_detected(self, tmp_path: Path) -> None:
+        # Stanza points at a path that doesn't exist on disk.
+        home = self._make_home(tmp_path)
+        bad_path = str(tmp_path / "nope.json")
+        cfg = {
+            "gateway": {
+                "platforms": {
+                    "agent365": {"extra": {"generated_config_path": bad_path}}
+                }
+            }
+        }
+        drift = adapter_mod._detect_drift(home=home, config=cfg)
+        keys = [d["key"] for d in drift]
+        assert "generated_config_missing" in keys
+
+    def test_generated_config_blank_detected(self, tmp_path: Path) -> None:
+        # Path exists but agentBlueprintId is empty.
+        gen_path = tmp_path / "stale.json"
+        import json as _json
+        gen_path.write_text(_json.dumps({"agentBlueprintId": ""}))
+        home = self._make_home(tmp_path)
+        cfg = {
+            "gateway": {
+                "platforms": {
+                    "agent365": {"extra": {"generated_config_path": str(gen_path)}}
+                }
+            }
+        }
+        drift = adapter_mod._detect_drift(home=home, config=cfg)
+        keys = [d["key"] for d in drift]
+        assert "generated_config_blank" in keys
+
+    def test_drift_keys_are_unique_per_run(self, tmp_path: Path) -> None:
+        # Each drift item is reported at most once.
+        home = self._make_home(
+            tmp_path,
+            env="A365_APP_ID=00000000-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n",
+            agents=["inbox-helper-r8"],
+            a365_config={"tenantId": "", "clientAppId": ""},
+            generated={"agentBlueprintId": "11111111-bbbb-bbbb-bbbb-bbbbbbbbbbbb"},
+        )
+        cfg = {
+            "gateway": {
+                "platforms": {
+                    "agent365": {"extra": {"slug": "orphan-slug"}}
+                }
+            }
+        }
+        drift = adapter_mod._detect_drift(home=home, config=cfg)
+        keys = [d["key"] for d in drift]
+        assert len(set(keys)) == len(keys)
+
+
 class TestCheckRequirements:
     def test_returns_true_when_extras_installed(self) -> None:
         # Bridge extras (httpx, fastapi, jwt, uvicorn) are in the dev

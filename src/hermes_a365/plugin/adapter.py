@@ -727,6 +727,218 @@ def is_connected(config: Any) -> bool:
     return validate_config(config)
 
 
+# Well-known Entra app id of the operator-side "Agent 365 CLI" custom
+# client app (Microsoft's convention; created by setup_blueprint and
+# carried across walkthroughs). Used to reseed ``~/a365.config.json``
+# when sweep-collateral leaves it with an empty clientAppId.
+_AGENT365_CLI_APP_ID = "58bfafcb-cfd6-4b3f-ba3b-a9e5848ac061"
+
+
+def _detect_drift(
+    *,
+    home: Path | None = None,
+    config: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Scan operator config files for drift that accumulates across
+    walkthroughs. Returns a list of dicts shaped::
+
+        {"key": str, "message": str, "fixer": Callable[[], None] | None}
+
+    Each ``key`` is stable for tests + ordering. Empty list means no
+    drift detected. Fix functions, where present, are safe to call in
+    any order — they each touch a single file with a narrow write.
+
+    Read-only — never mutates anything just by being called.
+
+    Args:
+        home: Override for ``Path.home()``. Defaults to the real home
+            dir. Tests pass a tmp_path to isolate the filesystem reads.
+        config: Override for the parsed ``~/.hermes/config.yaml``.
+            Defaults to ``hermes_cli.config.load_config()``. Tests
+            pass a synthetic dict to exercise stanza-shape branches.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    drift: list[dict[str, Any]] = []
+    home_dir = home if home is not None else _Path.home()
+    operator_env = home_dir / ".hermes" / ".env"
+    agents_dir = home_dir / ".hermes" / "agents"
+    a365_config = home_dir / "a365.config.json"
+
+    # Helpers — kept inline so this function has no module-level deps
+    # that could fail at gateway-load time.
+    def _read_env(path: _Path) -> dict[str, str]:
+        if not path.is_file():
+            return {}
+        out: dict[str, str] = {}
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            out[k.strip()] = v.strip().strip('"').strip("'")
+        return out
+
+    def _load_yaml_config() -> dict[str, Any] | None:
+        if config is not None:
+            return config
+        try:
+            from hermes_cli.config import load_config
+            cfg_ = load_config()
+            return cfg_ if isinstance(cfg_, dict) else None
+        except Exception:
+            return None
+
+    def _load_json(path: _Path) -> dict[str, Any] | None:
+        try:
+            with open(path) as f:
+                obj = _json.load(f)
+            return obj if isinstance(obj, dict) else None
+        except (OSError, _json.JSONDecodeError):
+            return None
+
+    env_vars = _read_env(operator_env)
+    cfg = _load_yaml_config() or {}
+    stanza = (
+        cfg.get("gateway", {}).get("platforms", {}).get("agent365", {})
+        if isinstance(cfg.get("gateway"), dict)
+        else {}
+    )
+    extra = stanza.get("extra", {}) if isinstance(stanza, dict) else {}
+
+    # 1. Stale A365_APP_ID — operator .env vs the latest generated
+    #    config's agentBlueprintId. Indicates a prior register's
+    #    output never propagated into the bootstrap env, so the
+    #    bridge would authenticate against the wrong app.
+    generated_path_hint = (
+        env_vars.get("A365_GENERATED_CONFIG_PATH")
+        or extra.get("generated_config_path")
+        or str(home_dir / "a365.generated.config.json")
+    )
+    generated = _load_json(_Path(generated_path_hint)) or {}
+    env_app = env_vars.get("A365_APP_ID", "")
+    gen_app = str(generated.get("agentBlueprintId") or "")
+    if env_app and gen_app and env_app != gen_app:
+        drift.append(
+            {
+                "key": "app_id_stale",
+                "message": (
+                    f"A365_APP_ID in ~/.hermes/.env is {env_app[:8]}… but "
+                    f"{generated_path_hint} carries {gen_app[:8]}… — "
+                    "operator .env is stale (a prior register's output didn't propagate)."
+                ),
+                # interactive_setup's regular flow re-reads the
+                # generated config + saves, so no auto-fixer needed.
+                "fixer": None,
+            }
+        )
+
+    # 2. Slug mismatch — config.yaml stanza references a slug that
+    #    isn't present under ~/.hermes/agents/. Indicates the platform
+    #    block survived a tenant change.
+    stanza_slug = extra.get("slug")
+    agent_slugs = (
+        sorted(d.name for d in agents_dir.iterdir() if d.is_dir())
+        if agents_dir.is_dir()
+        else []
+    )
+    if stanza_slug and agent_slugs and stanza_slug not in agent_slugs:
+        drift.append(
+            {
+                "key": "slug_orphan",
+                "message": (
+                    f"config.yaml stanza slug={stanza_slug!r} but ~/.hermes/agents/ has "
+                    f"{agent_slugs!r}. Platform block points at a non-existent per-agent dir."
+                ),
+                "fixer": None,
+            }
+        )
+
+    # 3. ~/a365.config.json sweep collateral — missing or empty
+    #    tenantId / clientAppId. Causes `update-endpoint --apply`
+    #    to exit early with config-validation errors.
+    cfg_json = _load_json(a365_config) if a365_config.is_file() else None
+    needs_reseed = False
+    detected_tenant = ""
+    if not a365_config.is_file():
+        # Missing file is fine if the operator works from a different
+        # cwd; only warn when the platform stanza explicitly references
+        # a different path that DOES exist.
+        pass
+    elif cfg_json is not None and (not cfg_json.get("tenantId") or not cfg_json.get("clientAppId")):
+        needs_reseed = True
+        # Detect tenant from az for the reseed hint.
+        import subprocess as _subprocess
+        try:
+            r = _subprocess.run(
+                ["az", "account", "show", "--query", "tenantId", "-o", "tsv"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if r.returncode == 0:
+                detected_tenant = r.stdout.strip()
+        except (OSError, _subprocess.TimeoutExpired):
+            pass
+
+    if needs_reseed:
+        target_tenant = detected_tenant or env_vars.get("A365_TENANT_ID", "")
+
+        def _reseed() -> None:
+            cur = _load_json(a365_config) or {}
+            if not cur.get("tenantId") and target_tenant:
+                cur["tenantId"] = target_tenant
+            if not cur.get("clientAppId"):
+                cur["clientAppId"] = _AGENT365_CLI_APP_ID
+            with open(a365_config, "w") as f:
+                _json.dump(cur, f, indent=2)
+                f.write("\n")
+
+        drift.append(
+            {
+                "key": "a365_config_empty",
+                "message": (
+                    f"{a365_config} exists with empty tenantId/clientAppId — "
+                    "`hermes a365 activity-bridge update-endpoint --apply` will fail."
+                ),
+                "fixer": _reseed if (target_tenant and a365_config.is_file()) else None,
+            }
+        )
+
+    # 4. generated_config_path in config.yaml stanza is unreachable
+    #    or has an empty blueprint id. Indicates the stanza was
+    #    written before the file was emitted (or pointed at a
+    #    superseded path).
+    stanza_gpath = extra.get("generated_config_path")
+    if stanza_gpath:
+        gp = _Path(stanza_gpath)
+        if not gp.is_file():
+            drift.append(
+                {
+                    "key": "generated_config_missing",
+                    "message": (
+                        f"config.yaml generated_config_path={stanza_gpath} doesn't exist — "
+                        "stanza points at a superseded path or register never wrote it."
+                    ),
+                    "fixer": None,
+                }
+            )
+        else:
+            gen_at_stanza = _load_json(gp) or {}
+            if not gen_at_stanza.get("agentBlueprintId"):
+                drift.append(
+                    {
+                        "key": "generated_config_blank",
+                        "message": (
+                            f"{stanza_gpath} exists but agentBlueprintId is empty — "
+                            "register apply must have failed or this is a stale empty seed."
+                        ),
+                        "fixer": None,
+                    }
+                )
+
+    return drift
+
+
 def interactive_setup() -> None:
     """``hermes gateway setup --platform agent365`` wizard.
 
@@ -738,7 +950,10 @@ def interactive_setup() -> None:
     ``gateway.platforms.agent365`` block.
 
     Idempotent — re-running detects existing values and prompts
-    update-vs-keep.
+    update-vs-keep. Slice 19r-b adds a drift-detection pass that runs
+    first: if any drift is found, the wizard surfaces it as warnings,
+    runs auto-fixers for items that have them, and falls through to
+    the regular reconfigure flow without asking again.
 
     Lazy-imports the ``hermes_cli.setup`` / ``hermes_cli.plugins_cmd``
     helpers so the plugin module stays importable in non-CLI contexts
@@ -761,9 +976,38 @@ def interactive_setup() -> None:
 
     print_header("Microsoft Agent 365")
 
+    # Slice 19r-b: drift detection pass.
+    drift = _detect_drift()
+    drift_force_reconfigure = False
+    if drift:
+        print_warning(f"Found {len(drift)} configuration drift item(s):")
+        for item in drift:
+            print_info(f"  • [{item['key']}] {item['message']}")
+        print()
+        if prompt_yes_no(
+            "Fix drift now (auto-fixers + reconfigure)?",
+            True,
+        ):
+            applied = 0
+            for item in drift:
+                fixer = item.get("fixer")
+                if callable(fixer):
+                    try:
+                        fixer()
+                        print_success(f"  ✓ auto-fixed [{item['key']}]")
+                        applied += 1
+                    except Exception as e:
+                        print_warning(f"  ✗ auto-fixer for [{item['key']}] failed: {e}")
+            if applied:
+                print_info(f"Auto-fixed {applied} item(s). Continuing to wizard to fix the rest…")
+            drift_force_reconfigure = True
+            print()
+        else:
+            print_info("Skipping drift fixes. Re-run the wizard if you change your mind.")
+
     existing_tenant = get_env_value("A365_TENANT_ID")
     existing_app = get_env_value("A365_APP_ID")
-    if existing_tenant and existing_app:
+    if existing_tenant and existing_app and not drift_force_reconfigure:
         print_info(
             f"agent365: already configured (tenant={existing_tenant[:8]}…, "
             f"app={existing_app[:8]}…)"
