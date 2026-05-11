@@ -48,7 +48,7 @@ Legend:
 | Teams meetings (in-call agent) | BF activity | `msteams` | meeting-scoped conversation; meeting-specific events (`participantsAdded`, `meetingStart`) | same | 🟢 | #5 (extra event types) | `_should_dispatch` may need additional filters |
 | Teams compose extensions ("@Hermes search …") | BF activity | `msteams` | invoke activities `composeExtension/*` | same | 🟡 | **#5** | invokes return SYNC payload, not async reply |
 | Mobile Teams | BF activity | `msteams` | same as desktop | same | 🟢 | — | identical wire shape |
-| M365 Copilot Chat (standalone web app) | BF activity | likely `msteams` (per agents SDK) or `copilot` | persistent conversation; entry point that surfaces in Word/Excel/PowerPoint/Outlook side-panels too | same | 🟢 | **#3 streaming** | Copilot Chat **requires streaming** for substantive replies (BF connector cuts off non-streaming at ~15s); without #3, only short turns work |
+| M365 Copilot Chat (standalone web app) | BF activity | likely `msteams` (per agents SDK) or `copilot` | persistent conversation; entry point that surfaces in Word/Excel/PowerPoint/Outlook side-panels too | same | 🟡 | **#24 Custom Engine Agent manifest** | The wire protocol matches (#3 streaming shipped 2026-05-11). What's missing is the *registration manifest* — Copilot Chat surfaces **Custom Engine Agents** (`manifestVersion: 1.21+`, `bots` + `copilotAgents` blocks, Teams App Catalog upload), not AI Teammates. Our current `--aiteammate` publish flow produces a manifest Copilot Chat doesn't surface. **Two parallel publish flows needed**, one per surface (see "Surface vs publish flow" matrix below). Diagnosed during 19s-bis walkthrough 2026-05-11. |
 | Outlook — chat-style invocation | BF activity | `emailoffice365` or `msteams` (TBC) | conversation per email thread | same | 🟢 | — | reach via Copilot Chat side-panel inside Outlook |
 | Outlook — compose-action panels | BF activity (invoke) | as Outlook | `task/fetch` / `task/submit` invokes | same | 🟡 | **#5** | each invoke returns a `taskInfo` envelope synchronously, not via `serviceUrl` |
 | Outlook — email-only flow (agent receives + sends real email) | BF activity | `emailoffice365` | one-off activities; reply via outbound email channel | same (likely) | 🟡 | **#5**, possibly #3 | low-priority unless email-driven workflows become a use case |
@@ -66,6 +66,34 @@ Legend:
 | OneNote agent | declarative agent + page-context | n/a | declarative manifest | declarative agent identity | 🔴 | new plugin | not a custom-engine route |
 | SharePoint Embedded containers (file storage) | Graph (`/storage`) | n/a | not a surface — content layer the agent reaches into via tools | Graph delegated | ⚪ | — | tooling concern, not surface concern; covered by Hermes' Graph tool integration if any |
 | Cron / proactive (any surface) | BF activity | matches the target surface | scheduled outbound; agent posts unsolicited via `serviceUrl` of cached `ConversationRef` | user-FIC ✅ | 🟡 | **#4** | slice 19o registry already has `ConversationRef`; #4 is the agent-side trigger mechanism |
+
+## Surface vs publish flow (2026-05-11)
+
+Two parallel publish flows from the same blueprint Entra app +
+service principal. The runtime (Hermes plugin + activity bridge +
+streaming) is identical for both; only the registration manifest
++ admin-centre flow differ.
+
+| Flow | Wrapper command | Manifest type | `manifestVersion` | Admin upload | Surfaces it lights up |
+|---|---|---|---|---|---|
+| **AI Teammate** | `hermes a365 publish --aiteammate --apply` | `agenticUserTemplates` shape | `devPreview` | M365 Admin Centre → Agents → Upload custom agent → Agent 365 admin centre per-user activation | Teams 1:1 ("Built for your org" list); shows up under the user's agentic identity |
+| **Custom Engine Agent** | `hermes a365 publish --copilot-chat --apply` (NOT YET SHIPPED — #24) | `bots` + `copilotAgents.customEngineAgents` blocks | `1.21+` | Teams Admin Center → Manage apps → Upload + assign per-user policy | M365 Copilot Chat (standalone web + side-panels in Word/Excel/PowerPoint/Outlook), Teams as a classic bot |
+
+Reasoning for keeping both: AI Teammates surface as agentic users
+(distinct identity in the user's tenant directory) which is the
+right shape for "Hermes is its own thing in your inbox"; Custom
+Engine Agents surface as Copilot agents (`@`-mention in the
+Copilot Chat prompt box) which is the right shape for "Hermes is
+a Copilot specialist". Operators may want both for the same
+underlying blueprint.
+
+Per Microsoft's [Custom Engine Agents overview](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/overview-custom-engine-agent#design-and-deployment-considerations):
+
+> Custom engine agents are supported in app manifest version 1.21
+> and later versions.
+
+— meaning the `devPreview` AI Teammate manifest is structurally
+incompatible with Copilot Chat surfacing. Fixed in #24.
 
 ## Surfaces we explicitly do NOT cover
 

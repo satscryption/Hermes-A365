@@ -6,6 +6,66 @@ follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-11
+
+Feature release: Bot Framework streaming-response protocol. Closes
+#3. Validated live in Microsoft Teams 1:1 chat against the
+`satscryption.io` tenant over multiple long prompts.
+
+### Added
+
+- **Slice 19s:** `Agent365Adapter.edit_message` implements the BF
+  streaming-response wire protocol — `typing` activity with
+  `streaminfo` entity, monotonic `streamSequence` (omitted on
+  final), `type=message` swap on the close, captured `streamId`
+  from the first 201. `REQUIRES_EDIT_FINALIZE = True` so Hermes'
+  stream consumer routes the final `endStream()` through. 1.5 s
+  pacing (Microsoft's recommended), DM-only refusal, full error-code
+  mapping (`ContentStreamNotAllowed`, sequence-order failures, rate
+  limits).
+- **Slice 19s-bis:** `send()` participates in the same BF stream
+  as `edit_message` so each Hermes segment renders as a single
+  growing bubble (no more separate send-bubble + stream-bubble
+  per segment). Three live-test fixes:
+  - Stream-aware `send()`: when `reply_to is not None` AND chat is
+    personal AND no active stream, `send()` POSTs the streaming-start
+    activity and captures the BF stream id as the message_id.
+  - `_strip_streaming_cursor`: removes Hermes' cursor character
+    (` ▉`) before POSTing — BF's "chunk N+1 must start with chunk N"
+    rule was failing because of the trailing cursor.
+  - `_auto_finalize_stale_stream` + recently-finalized no-op:
+    handles two Hermes stream-consumer quirks (segment break without
+    finalize, double-finalize after the legitimate close) that left
+    stuck "thinking" bubbles.
+
+### Tests
+
+- 14 new tests in `TestEditMessage` (slice 19s) covering each wire-
+  shape branch + every error code in the mapping.
+- 8 new tests in `TestSendStreamStart` (slice 19s-bis) covering
+  stream-start happy path, reply_to=None fallback, group/channel
+  refusal, stream-start failure fallback, auto-finalize on stale
+  stream, no-op for post-finalize calls.
+- 673 total tests pass. ruff clean.
+
+### Known scope
+
+- **M365 Copilot Chat surface** (#16) is gated on **#24** (Custom
+  Engine Agent publish path), not on streaming. Copilot Chat
+  surfaces Custom Engine Agents (`manifestVersion: 1.21+`, `bots`
+  + `copilotAgents` blocks, Teams App Catalog upload) which are a
+  different manifest type from AI Teammates (current
+  `--aiteammate` publish flow). The streaming work in this
+  release applies to either surface; only the registration
+  manifest needs to change.
+- **Tool progress mid-stream** can theoretically conflict with
+  the "one streaming sequence per user turn" rule. Auto-finalize
+  closes the prior stream first; subsequent UX may show two
+  consecutive bubbles per turn (tool progress → content stream).
+  Acceptable for now; if a future operator wants tool progress
+  suppressed on the agent365 platform, set
+  `display.platforms.agent365.tool_progress: off` in config.yaml.
+
 ## [0.2.0] — 2026-05-11
 
 First feature release after the v0.1 PyPI series. Closes #13 (setup
