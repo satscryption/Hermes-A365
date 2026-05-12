@@ -1,71 +1,110 @@
 # M365 surface coverage for the `agent365` plugin
 
-**Snapshot:** 2026-05-06 (slice 19t quick pass).
+**Snapshot:** 2026-05-12 (slice 19u-a + post-walkthrough reframe).
 
 This file maps every Microsoft 365 / Agent 365 / Copilot surface where
 a Hermes agent could plausibly appear, with our adapter's coverage
 status for each. Microsoft's surface inventory drifts fast — refresh
 this on every walkthrough.
 
+## Positioning: Hermes-A365 vs sibling Hermes Teams plugins
+
+Hermes ships its own **classic-Bot-Framework Microsoft Teams adapter**
+(see `plugins/platforms/teams/adapter.py` in the harness, shipped
+v2026.4.30; in-flight enhancements in
+[hermes-agent#10037](https://github.com/NousResearch/hermes-agent/pull/10037)
+and [hermes-agent#13767](https://github.com/NousResearch/hermes-agent/pull/13767)).
+**That is the right tool when you want Hermes as a generic Teams chat
+bot** — Azure App Registration + client secret / certificate / Managed
+Identity + Teams app manifest with `bots[]`; reach is DM, channels,
+group chats, threading, file attachments.
+
+**Hermes-A365 covers what classic Teams bots structurally cannot:**
+
+| Path | Surfacing | Operator prerequisites | Status |
+|---|---|---|---|
+| **A — AI Teammate** (M365 agentic user) | Agent appears in M365 tenant directory + "Built for your org" picker + M365 People search + agentic-user audit trails. Teams 1:1 chat with M365-native identity (distinct from a classic bot's user-facing affordance). | M365 tenant + Frontier Preview Program + Tier 3 license. **No Azure subscription.** | ✅ Round-8 end-to-end 2026-05-11 (v0.2.0 wizard, v0.3.0 streaming) |
+| **B — Custom Engine Agent** (Azure Bot Service + 1.21 manifest) | Agent appears in M365 Copilot Chat's agents picker, side-panels in Word/Excel/PowerPoint/Outlook, and Copilot-fabric search. Also reaches classic Teams surfaces (1:1 / group / channel) as a side effect of the Microsoft Teams channel on Bot Service. | Path A's prerequisites **+ Azure subscription** for Bot Service registration of the blueprint Entra app with the Microsoft Teams channel enabled. | ⏸ Emitter shipped 2026-05-12 (slice 19u-a, `hermes a365 publish --copilot-chat`); live surfacing test deferred pending Azure subscription provisioning (#16). |
+
+Both paths share the same blueprint Entra app + service principal + bot
+endpoint (`/api/messages`), so an operator with both prerequisites can
+run both surfaces from one Hermes-A365 install. They are not mutually
+exclusive.
+
+**When to pick what:**
+
+- *"Hermes is a chat bot in Teams (DM / channels / group / file uploads)"* →
+  sibling Hermes Teams adapter (classic BF). No M365 directory identity,
+  no Copilot Chat surfacing.
+- *"Hermes is a first-class agentic user in our M365 tenant directory"* →
+  Hermes-A365 Path A (AI Teammate). Teams 1:1 with M365-native identity.
+- *"Hermes surfaces in M365 Copilot Chat and the Copilot side-panels"* →
+  Hermes-A365 Path B (Custom Engine Agent). Requires Azure subscription.
+- *"All of the above"* → install both Hermes' Teams adapter AND
+  Hermes-A365; configure each for its lane.
+
 ## Architectural framing
 
-Microsoft has three orthogonal layers an "agent" can sit in. **The
-agent365 plugin lives in the third layer.**
+Microsoft has three orthogonal layers an "agent" can sit in. **Hermes-A365
+operates in layers 1 and 3 (identity + surface); the sibling Teams
+adapter operates in layer 3 only.**
 
-| layer | what lives here | our involvement |
-|---|---|---|
-| Identity / governance ("Agent 365") | Observe / govern / secure: agent registry, agentic users, audit, Purview / Defender hooks | Consumed — `register --apply` + `publish --aiteammate` register us in this layer |
-| Authoring / runtime ("M365 Copilot extensibility") | **Declarative agents** (manifest + Copilot's orchestrator) vs **custom-engine agents** (bring your own orchestrator + LLM) | We are a **custom-engine agent** built on the M365 Agents SDK shape — Hermes is the orchestrator + model, our `/api/messages` route is the bot endpoint Microsoft routes to |
-| Surface ("the channel the user is using") | Teams 1:1 / channel / meeting, Copilot Chat (web / Word side-panel / Excel side-panel / etc.), Outlook compose, mobile, web chat, Slack-via-bridge, … | This file's coverage matrix |
+| layer | what lives here | sibling Teams adapter | Hermes-A365 Path A | Hermes-A365 Path B |
+|---|---|---|---|---|
+| Identity / governance ("Agent 365") | agent registry, agentic users, audit, Purview / Defender hooks | bot identity only (Entra app, no agentic user) | ✅ agentic user template + M365 directory entry | bot identity only; uses Bot Service registration |
+| Authoring / runtime ("M365 Copilot extensibility") | **declarative agents** vs **custom-engine agents** | custom-engine via classic BF | custom-engine via M365 agentic user routing | custom-engine via Bot Service routing |
+| Surface ("the channel the user is using") | Teams / Copilot Chat / Outlook / etc. | Teams 1:1, group, channel | Teams 1:1 ("Built for your org" picker) | Copilot Chat picker, side-panels, classic Teams reach as side effect |
 
-Custom-engine agents reach the surface layer via the **Bot Framework
-activity protocol** over a single `/api/messages` endpoint — every
-channel below that says "BF activity" gets normalized into the same
-inbound shape. Our adapter validates, dedupes, dispatches into Hermes,
-and replies via `serviceUrl`.
+All three reach the surface layer via the **Bot Framework activity
+protocol** over a single `/api/messages` endpoint — every channel below
+that says "BF activity" gets normalized into the same inbound shape.
+What differs is **how Microsoft's routing layer decides to forward
+activities to that endpoint** (agentic user instance vs Bot Service
+channel vs classic BF channel) and what the agent's user-facing
+identity looks like.
 
 Declarative agents are a *different runtime entirely* — they don't
 have a bot endpoint, they have a manifest Microsoft's orchestrator
 parses. Surfaces that only work as declarative agents (some Word /
-Excel / PowerPoint native experiences) are out of scope for this
-plugin.
+Excel / PowerPoint native experiences) are out of scope for both
+Hermes-A365 and the sibling Teams adapter.
 
 ## Coverage matrix
 
 Legend:
 
-- ✅ **works as-is** — adapter handles, validated live or trivial extension
-- 🟢 **works with extensions** — BF route handles, needs minor `chat_type` / activity-type mapping
-- 🟡 **works with new code** — different invoke type or new auth flow needed (often a tracked issue below)
-- 🔴 **needs new plugin** — protocol mismatch, can't reuse this adapter
-- ⚪ **out of scope** — not a meaningful Hermes surface
+- ✅ **shipped + validated** — Hermes-A365 covers this end-to-end, validated live
+- 🟡 **shipped, validation deferred** — code is in place but live test gated on operator prerequisites (e.g. Azure subscription)
+- 🔵 **sibling-plugin lane** — better covered by Hermes' classic Teams adapter; cross-link rather than duplicate
+- 🔴 **out of scope** — would need a separate package (declarative agents, Office Add-ins, etc.)
+- ⚪ **non-surface** — not a chat/invoke endpoint (content layer, tooling concern)
 
-| Surface | Protocol | `channelId` | Hosting model | Auth | Coverage | Depends on | Notes |
-|---|---|---|---|---|---|---|---|
-| Teams 1:1 chat | BF activity | `msteams` | persistent conversation | user-FIC ✅ | ✅ | — | round-5 §9d validated 2026-05-06 |
-| Teams group chat | BF activity | `msteams` | persistent conversation, `conversationType=groupChat` | same | 🟢 | — | adapter maps `chat_type=group`; needs live walkthrough |
-| Teams team channels (incl. threading) | BF activity | `msteams` | `conversationType=channel`, `replyToId` for threading | same | 🟢 | — | `SessionSource.thread_id` should populate from `conversation.id` thread-suffix; minor extension |
-| Teams meetings (in-call agent) | BF activity | `msteams` | meeting-scoped conversation; meeting-specific events (`participantsAdded`, `meetingStart`) | same | 🟢 | #5 (extra event types) | `_should_dispatch` may need additional filters |
-| Teams compose extensions ("@Hermes search …") | BF activity | `msteams` | invoke activities `composeExtension/*` | same | 🟡 | **#5** | invokes return SYNC payload, not async reply |
-| Mobile Teams | BF activity | `msteams` | same as desktop | same | 🟢 | — | identical wire shape |
-| M365 Copilot Chat (standalone web app) | BF activity | likely `msteams` (per agents SDK) or `copilot` | persistent conversation; entry point that surfaces in Word/Excel/PowerPoint/Outlook side-panels too | same | 🟡 | **Azure subscription** (Bot Service registration); emitter shipped slice 19u-a | The wire protocol matches (#3 streaming shipped 2026-05-11). Custom Engine Agent emitter (`hermes a365 publish --copilot-chat`) shipped 2026-05-12 (slice 19u-a): post-processes the GA CLI's AI Teammate zip into a `manifestVersion: "1.21"` + `bots` + `copilotAgents.customEngineAgents` shape, with a fresh manifest.id to avoid Teams App Catalog duplicate-id conflict against the AI Teammate registration. **Surfacing in Copilot Chat additionally requires an Azure subscription + Azure Bot Service resource with Microsoft Teams channel enabled** — confirmed during 2026-05-12 live walkthrough. #16 deferred-pending-Azure-subscription. Diagnosed during 19s-bis walkthrough 2026-05-11. |
-| Outlook — chat-style invocation | BF activity | `emailoffice365` or `msteams` (TBC) | conversation per email thread | same | 🟢 | — | reach via Copilot Chat side-panel inside Outlook |
-| Outlook — compose-action panels | BF activity (invoke) | as Outlook | `task/fetch` / `task/submit` invokes | same | 🟡 | **#5** | each invoke returns a `taskInfo` envelope synchronously, not via `serviceUrl` |
-| Outlook — email-only flow (agent receives + sends real email) | BF activity | `emailoffice365` | one-off activities; reply via outbound email channel | same (likely) | 🟡 | **#5**, possibly #3 | low-priority unless email-driven workflows become a use case |
-| Microsoft Search invocation | BF activity (invoke) | `msteams` | invoke `search` shape | same | 🟡 | **#5** | unconfirmed protocol path |
-| Web chat / Direct Line embed | BF activity | `webchat` / `directline` | persistent conversation; no Microsoft tenant context | own bearer | 🟡 | new auth | bypasses A365 user-FIC entirely; would need a separate auth path |
-| SharePoint embedded chat (`SPEmbedded`) | BF activity | `directline` (Direct Line shared with web chat) | embed surface in SP site | own bearer | 🟡 | new auth | similar to web chat |
-| Mobile / custom-app chat (Direct Line) | BF activity | `directline` | tenant ↔ direct line | own bearer | 🟡 | new auth | — |
-| Slack | BF activity (Azure Bot Service channel) | `slack` | external messaging | Slack OAuth tokens | 🟢 | — | adapter handles; channel mapping needs a `chat_type` row |
-| Telegram, WhatsApp, Facebook, Twilio SMS, Line, Kik, GroupMe | BF activity | each respective `channelId` | external messaging | per-channel auth | 🟢 | — | architecturally same; out of A365's primary scope but listed for completeness |
-| Direct Line Speech | BF activity | `directlinespeech` | speech-driven; uses STT/TTS pipeline | own bearer | 🟡 | new auth + audio | unlikely value prop for Hermes-A365 |
-| Power Platform / Copilot Studio publish | BF activity (Azure Bot Service) | varies | depends on publish target | depends | 🟢 | — | publishing path goes through Copilot Studio, not us |
-| Word / Excel / PowerPoint Copilot side-panel (declarative agent) | declarative agent manifest | n/a | manifest + Copilot's orchestrator (NOT custom code) | declarative agent uses signed-in-user identity | 🔴 | new plugin | Hermes can't be a declarative agent — declarative means "Microsoft hosts the orchestrator". To appear *inside* Word as Hermes itself, user invokes Copilot Chat side-panel which already routes to us |
-| Word / Excel / PowerPoint as Office Add-in (ribbon button, task pane) | Office Add-in API | n/a | TS/JS code in iframe | Office identity + add-in scopes | 🔴 | new plugin | different SDK entirely; would be a *separate* `office-addin-agent365` package, not this plugin |
-| Loop components | Loop component SDK | n/a | embedded React component | Loop identity | 🔴 | new plugin | similar story to Office Add-ins |
-| OneNote agent | declarative agent + page-context | n/a | declarative manifest | declarative agent identity | 🔴 | new plugin | not a custom-engine route |
-| SharePoint Embedded containers (file storage) | Graph (`/storage`) | n/a | not a surface — content layer the agent reaches into via tools | Graph delegated | ⚪ | — | tooling concern, not surface concern; covered by Hermes' Graph tool integration if any |
-| Cron / proactive (any surface) | BF activity | matches the target surface | scheduled outbound; agent posts unsolicited via `serviceUrl` of cached `ConversationRef` | user-FIC ✅ | 🟡 | **#4** | slice 19o registry already has `ConversationRef`; #4 is the agent-side trigger mechanism |
+| Surface | Best Hermes-stack path | Hermes-A365 coverage | Notes |
+|---|---|---|---|
+| Teams 1:1 chat (M365 agentic identity) | **Hermes-A365 Path A** | ✅ | Round-5 §9d validated 2026-05-06; round-8 E2E re-validated 2026-05-11 with streaming. Agent appears in "Built for your org" picker. |
+| Teams 1:1 chat (generic chat bot, no M365 directory identity) | **Sibling Teams adapter** ([`plugins/platforms/teams/`](https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/teams)) | 🔵 | Use the sibling for classic Teams 1:1 if you don't need M365-native agentic identity. |
+| Teams group chat (`conversationType=groupChat`) | **Sibling Teams adapter** | 🔵 | Classic BF handles this natively. Hermes-A365 Path A doesn't reach group chats (agentic users are 1:1-only); Path B reaches it as a side effect of the Microsoft Teams channel, but the sibling is the cleaner tool. |
+| Teams team channels (incl. `replyToId` threading) | **Sibling Teams adapter** | 🔵 | Same reasoning as group chat. |
+| Teams meetings (in-call agent, `participantsAdded` / `meetingStart`) | **Sibling Teams adapter** | 🔵 | BF meeting events; sibling adapter's lane. |
+| Mobile Teams | **Sibling Teams adapter** or Hermes-A365 Path A (1:1) | 🔵 / ✅ | Identical wire shape; either path's surfacing applies. |
+| **M365 Copilot Chat** (standalone web app) | **Hermes-A365 Path B** | 🟡 | Custom Engine Agent emitter shipped 2026-05-12 (slice 19u-a, `hermes a365 publish --copilot-chat`). **Surfacing gated on Azure subscription + Azure Bot Service registration of the blueprint Entra app (Microsoft Teams channel enabled).** Live walkthrough 2026-05-12 confirmed the prerequisite. #16 deferred pending Azure provisioning. |
+| Word / Excel / PowerPoint Copilot **side-panels** (Hermes as Copilot agent) | **Hermes-A365 Path B** | 🟡 | Same Custom Engine Agent registration as Copilot Chat lights these up; same Azure prerequisite. Distinct from declarative Office Copilot agents (those are a different runtime — see "Out of scope" below). |
+| Outlook — chat-style invocation (Copilot Chat side-panel inside Outlook) | **Hermes-A365 Path B** | 🟡 | Same Custom Engine Agent path. |
+| Microsoft Search invocation (`search` invoke) | **Hermes-A365 Path B** + #18 | 🟡 | Custom Engine Agent + invoke handling. Routed via Bot Service Microsoft Teams channel; specific to Copilot fabric. |
+| Outlook — compose-action panels (`task/fetch` / `task/submit`) | Sibling Teams adapter OR Hermes-A365 Path B | 🔵 / 🟡 | Depends on whether the operator wants the compose-action backed by classic BF (sibling) or by the Copilot-fabric Custom Engine Agent (Path B). Either way needs invoke handling (#18). |
+| Teams compose extensions ("@Hermes search …", `composeExtension/*` invokes) | **Sibling Teams adapter** + #18-shape work | 🔵 | Classic BF surface; sibling's lane. Hermes-A365 doesn't add value over the sibling here. |
+| Outlook — email-only flow (agent receives + sends real email) | **Sibling Teams adapter** (`emailoffice365` channel) or Graph email skill | 🔵 | Niche; sibling can take it via the BF email channel. Hermes-A365 has no specific advantage. |
+| Web chat / Direct Line embed | Sibling adapter or separate skill | 🔵 | Bypasses M365 entirely; not Hermes-A365's lane. |
+| SharePoint embedded chat (`SPEmbedded`) | Sibling adapter or separate skill | 🔵 | Same — Direct Line, no M365 directory presence. |
+| Slack / Telegram / WhatsApp / Twilio / Line / Kik / GroupMe | Use the respective Hermes platform adapters | 🔵 | Each external messenger has its own first-class Hermes adapter; Hermes-A365 not the right path. |
+| Cron / proactive sends (any surface) | **Hermes-A365 (either path)** + #4 | 🟡 | Cron-driven outbound on M365 surfaces — slice 19o `ConversationRef` registry already shipped; #4 is the agent-side trigger mechanism. Sibling Teams adapter handles its own proactive sends independently. |
+| Word / Excel / PowerPoint Copilot side-panel as **declarative agent** | Separate skill (not this one) | 🔴 | Declarative agents are a different runtime — Microsoft hosts the orchestrator + LLM. Hermes' value prop is the orchestrator, so we're a custom-engine agent (see Path B), not a declarative one. |
+| Office Add-ins (ribbon button, task pane) | Separate skill | 🔴 | Different SDK entirely; would be a complementary `office-addin-*` package. |
+| Loop components | Separate skill | 🔴 | Loop SDK; not a BF-protocol surface. |
+| OneNote agent | Separate skill | 🔴 | Declarative-agent shape; not a custom-engine route. |
+| SharePoint Embedded containers (file storage) | Graph tool integration | ⚪ | Content layer, not a surface. |
+| Direct Line Speech | Separate skill if voice becomes a priority | 🔴 | Voice surface; needs STT/TTS pipeline Hermes doesn't have today. |
+| Power Platform / Copilot Studio publish | Copilot Studio's own publish flow | ⚪ | Microsoft publishes the agent through Copilot Studio; not Hermes-A365's lane. |
 
 ## Surface vs publish flow (2026-05-11)
 
@@ -110,44 +149,98 @@ subscription decision.
 
 Out-of-scope decisions, with reasons:
 
-- **Declarative agents** — wrong runtime layer. Microsoft's orchestrator + foundation model handle the reasoning; we'd contribute *knowledge* and *actions*, not the agent loop. Hermes' value prop is the loop.
-- **Office Add-ins** — different SDK, different security model. Would be a separate *complementary* package (e.g. an Outlook add-in that opens a side-pane backed by our existing API). Out of this slice's scope.
-- **Loop components** — same as Office Add-ins.
-- **Cortana / Direct Line Speech** — voice surface. Architecturally fine but no audio handling in Hermes today; non-priority.
+- **Generic Teams chat as a bot (1:1, group, channel, threading,
+  attachments)** — sibling-plugin lane. Use Hermes' classic
+  Bot-Framework Teams adapter (`plugins/platforms/teams/`,
+  shipped v2026.4.30). Hermes-A365 adds nothing over the sibling
+  for these surfaces unless the operator wants M365-native
+  agentic-user identity (Path A) or Copilot-fabric surfacing
+  (Path B).
+- **Declarative agents** (Word / Excel / PowerPoint / OneNote
+  native Copilot agents) — wrong runtime layer. Microsoft's
+  orchestrator + foundation model handle the reasoning; we'd
+  contribute *knowledge* and *actions*, not the agent loop.
+  Hermes' value prop is the loop, so Hermes-A365 only does
+  custom-engine agents.
+- **Office Add-ins** — different SDK, different security model.
+  Would be a separate *complementary* package
+  (`office-addin-*`).
+- **Loop components** — same shape as Office Add-ins.
+- **Cortana / Direct Line Speech** — voice surface. Architecturally
+  fine but no audio handling in Hermes today; non-priority.
+- **Web chat / Direct Line / SharePoint Embedded** — bypass M365
+  entirely. If you genuinely want web-chat reach, use a generic
+  Direct Line skill rather than Hermes-A365.
 
 ## Validation status
 
 | Surface | Walkthrough | Last validated | Result |
 |---|---|---|---|
-| Teams 1:1 chat | round-5 §9d | 2026-05-06 | ✅ end-to-end via Hermes plugin path |
-| Teams 1:1 chat (gateway-restart durability) | round-5 §9d.6 | 2026-05-06 | ✅ slice 19o registry hydrated |
-| All other surfaces | — | — | NOT YET WALKED |
+| Path A Teams 1:1 (round-5 §9d) | round-5 §9d | 2026-05-06 | ✅ E2E via Hermes plugin path |
+| Path A Teams 1:1 (gateway-restart durability) | round-5 §9d.6 | 2026-05-06 | ✅ slice 19o registry hydrated |
+| Path A Teams 1:1 (full E2E + streaming on v0.3.0) | round-8 | 2026-05-11 | ✅ BF streaming protocol via `edit_message` validated (closes #3) |
+| Path B Copilot Chat (emitter only — no Azure sub) | 2026-05-12 | 2026-05-12 | 🟡 manifest emitter shipped; agent enters Teams App Catalog but doesn't surface in Copilot Chat without Azure Bot Service. #16 deferred. |
+| All other surfaces | — | — | NOT YET WALKED (most are sibling-plugin lane) |
 
 ## Highest-value next walkthroughs
 
-Ranked by "what would tell us most for least effort":
+Ranked by "what would tell us most about Hermes-A365's lane for least effort":
 
-1. **Microsoft 365 Copilot Chat (standalone)** — same protocol, different channel context. Tests whether our `_should_dispatch` filter handles the Copilot Chat shape and whether replies render. Requires #3 (streaming) for non-trivial replies. **High value** — Copilot Chat is the surface most users will discover the agent through.
-2. **Teams group chat** — same protocol, different `conversationType`. Tests `chat_type=group` mapping. **Medium value** — likely Just Works.
-3. **Outlook compose-action (`task/fetch`/`task/submit`)** — first invoke-type test, needs #5. **High value** — Outlook is the most common user surface in many orgs.
-4. **Teams team channel + threading** — proves the `replyToId` outbound shape across thread boundaries. **Medium value** — tests slice 19o registry under multi-thread shape.
+1. **Path B Copilot Chat end-to-end** (#16) — gated on Azure
+   subscription provisioning + Bot Service registration. Once
+   that's in place, validates: Custom Engine Agent surfacing in
+   Copilot Chat agents picker, streaming round-trip on a non-Teams
+   surface, and the side-panel reach (Word/Excel/PowerPoint/Outlook)
+   as a side effect. **Highest unique value** — the entire defensible
+   reason to use Hermes-A365 over the sibling Teams adapter for
+   anything beyond agentic-user identity.
+2. **Path A AI Teammate on a fresh tenant** — re-walk the
+   register → publish → instance → Teams 1:1 round-trip against
+   the latest CLI on a clean tenant to catch wizard / setup
+   regressions. Cheap; runs in the existing playbook
+   (`references/live-tenant-test.md`).
+3. **Outlook compose-action** (`task/fetch` / `task/submit`) via
+   Path B — first invoke-type test; gated on #18 (invoke handlers).
+   Depends on Path B Azure being live too.
+4. **Microsoft Search invocation** via Path B — similar shape to
+   compose-action; also needs #18 + Azure.
+
+Sibling-plugin lane walks (Teams group / channel / meetings) are
+**deliberately omitted** — they belong on the sibling adapter's
+roadmap, not Hermes-A365's.
 
 ## Backlog impact
 
-Existing open issues whose scope is touched by this matrix (Phase 4
-recommendations follow in slice 19t's commit / issue updates):
+Existing open issues whose scope is touched by this matrix, with
+their state under the reframed positioning:
 
-- **#3 (streaming)** — gates **Microsoft 365 Copilot Chat substantive
-  replies**. The matrix elevates this from "nice to have" to "needed
-  before Copilot Chat surface validates".
-- **#4 (proactive)** — surface-agnostic, but the matrix surfaces it
-  as the prerequisite for cron-driven flows on any surface.
-- **#5 (invoke action types)** — gates **Outlook compose-actions**,
-  **Teams compose extensions**, and **Microsoft Search invocation**.
-  Each invoke name is a separate child issue; #5 should be split if
-  any of them gets an actual user-driven priority.
-- **#13 (setup wizard)** — surface-agnostic.
-- **#14 (secret regression)** — surface-agnostic.
+- **#3 (streaming)** — **closed 2026-05-11** by slices 19s + 19s-bis.
+  Custom-engine streaming protocol via `edit_message`. Applies to
+  both Path A and Path B.
+- **#4 (proactive)** — surface-agnostic; applies to both paths and
+  the sibling Teams adapter independently. Cron-driven flows on M365
+  surfaces still need this.
+- **#13 (setup wizard)** — **closed 2026-05-11** by slice 19r.
+  Interactive setup + drift detection ship in v0.2.0.
+- **#14 (secret regression)** — closed 2026-05-07 by slice
+  `--auto-recover-secret`.
+- **#16 (Copilot Chat walkthrough)** — Path B's primary validation.
+  Deferred pending Azure subscription decision.
+- **#17 (Teams group + channel walkthrough)** — **superseded by
+  the sibling Teams adapter's roadmap**. Hermes-A365 does not own
+  this lane. Recommend closing in favour of cross-link to the
+  sibling.
+- **#18 (invoke activities)** — scope narrowed to Path B-relevant
+  invokes: `task/fetch` / `task/submit` for Outlook compose-action
+  inside Copilot, `search` for Microsoft Search inside Copilot,
+  `signin/verifyState` for OAuth tools. Compose-extension invokes
+  (`composeExtension/*`) move to the sibling adapter's roadmap.
+- **#24 (Custom Engine Agent emitter)** — **closed 2026-05-12** by
+  slice 19u-a.
+- **#25 (setup wizard XDG symlink gap)** — surface-agnostic;
+  blocks both paths' setup.
+- **#26 (`--manifest-id` flag)** — Path B-specific; needed for
+  operators running A + B simultaneously.
 
 ## Sources
 

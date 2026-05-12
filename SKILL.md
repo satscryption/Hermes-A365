@@ -1,6 +1,6 @@
 ---
 name: hermes-a365
-description: Use when registering or operating a Hermes-driven agent under Microsoft Agent 365 governance — covers `a365 setup blueprint`, `setup permissions {mcp,bot}`, per-agent runtime config, manifest packaging via `a365 publish`, environment doctor, status reporting against `query-entra`, the Bot Framework activity bridge that backs the Hermes `agent365` gateway platform, and destructive cleanup.
+description: Use when integrating a Hermes agent into the Microsoft 365 ecosystem — agent-as-tenant-directory-identity (AI Teammate / agentic user) or Copilot Chat surfacing (Custom Engine Agent + Azure Bot Service). Distinct from Hermes' sibling Teams adapter (`plugins/platforms/teams/`) which covers classic Bot-Framework Teams chat. Wraps the GA `Microsoft.Agents.A365.DevTools.Cli` verbs, ships the BF activity bridge that backs the `agent365` gateway platform, and emits both AI Teammate and Custom Engine Agent manifests.
 version: 0.3.0
 author: Hermes Agent
 license: MIT
@@ -14,6 +14,7 @@ metadata:
       - bot-framework
       - mcp
       - cloud-platforms
+      - copilot-chat
     related_skills:
       - hermes-agent-skill-authoring
 ---
@@ -22,41 +23,77 @@ metadata:
 
 ## Overview
 
-Microsoft Agent 365 (A365, GA 2026-05-01) is a governance / identity /
-observability control plane for AI agents that bolts on top of any agent
-stack and adds Entra-backed identity, tenant licensing, agent blueprints,
-MCP-mediated Microsoft 365 data access ("Work IQ"), Bot Framework activity
-bridging, OpenTelemetry, and channel adapters for Teams / Outlook /
-Microsoft 365 Copilot. This skill drives those capabilities from inside
-the Hermes harness so a Hermes agent can appear as a first-class A365
-agent without re-implementing any of the governance surface.
+Hermes-A365 is the **M365 Copilot ecosystem path** for Hermes agents.
+It covers the surfaces a classic Bot Framework Teams bot structurally
+cannot reach:
+
+- **Path A — AI Teammate (M365 agentic user):** the Hermes agent
+  appears as a first-class agentic identity in your M365 tenant
+  directory, in the "Built for your org" picker, in M365 People
+  search, and in agentic-user audit trails. Teams 1:1 chat with
+  M365-native identity. No Azure subscription required.
+- **Path B — Custom Engine Agent (Azure Bot Service + 1.21 manifest):**
+  the Hermes agent appears in M365 Copilot Chat's agents picker, in
+  Copilot side-panels inside Word / Excel / PowerPoint / Outlook,
+  and reaches the Copilot fabric's invoke surfaces (Microsoft Search,
+  Outlook compose-action). Requires an Azure subscription so the
+  blueprint Entra app can be registered as an Azure Bot Service
+  resource.
+
+Both paths share the same blueprint Entra app + service principal +
+bot endpoint, and operators with both prerequisites can run both
+surfaces from one Hermes-A365 install.
+
+**Distinct from Hermes' sibling Teams adapter** at
+`plugins/platforms/teams/adapter.py` (shipped v2026.4.30 + in-flight
+work in `hermes-agent#10037` and `#13767`). That adapter is the right
+tool for generic Teams chat bots — DM, channels, group chats,
+threading, file attachments — using classic Bot Framework with an
+Azure App Registration + client secret / certificate / Managed
+Identity. It gives no M365 directory identity and no Copilot Chat
+surfacing.
+
+Microsoft Agent 365 (A365, GA 2026-05-01) is the governance / identity
+/ observability control plane Hermes-A365 plugs into: Entra-backed
+agentic identity, tenant licensing, agent blueprints, MCP-mediated
+Microsoft 365 data access ("Work IQ"), OpenTelemetry, and the
+channel adapters for Teams / Outlook / M365 Copilot.
 
 The wrapper is built directly on the GA `Microsoft.Agents.A365.DevTools.Cli`
 verbs documented in [`references/a365-cli-reference.md`](references/a365-cli-reference.md).
 The skill composes them into idempotent plan/apply flows, fills the
 gaps the CLI doesn't cover (license decision, admin consent grant,
-runtime `.env` generation), and ships a Bot Framework activity bridge
-+ Hermes gateway platform plugin (`agent365`) that round-trips messages
-between A365 and the Hermes agent loop.
+runtime `.env` generation, Custom Engine Agent manifest transform),
+and ships a Bot Framework activity bridge + Hermes gateway platform
+plugin (`agent365`) that round-trips messages between A365 and the
+Hermes agent loop.
 
 ## When to Use
 
-Use when the user wants to:
+Use when the user wants any of:
 
-- Stand up a brand-new A365-governed Hermes agent on a clean Microsoft
-  tenant.
-- Package an existing Hermes agent's manifest for upload to the M365
-  Admin Centre (channel deployment is operator-side).
-- Verify environment / config / scope posture before or after a change.
-- Tear down an agent's Azure App Service, instance identity, and
-  blueprint app cleanly.
-- Migrate an OpenClaw-on-A365 deployment to Hermes (the existing
+- Hermes registered as a first-class M365 **agentic identity** —
+  appears in the tenant directory, agentic-user audit, "Built for
+  your org" picker. Path A.
+- Hermes available in **M365 Copilot Chat** (agents picker /
+  `@`-mention / side-panels in Word / Excel / PowerPoint / Outlook).
+  Path B. Requires Azure subscription.
+- A Bot Framework activity bridge backed by **A365 governance**
+  (Entra-backed identity, MCP-mediated Microsoft 365 data, OTLP
+  audit trails).
+- Migrating an OpenClaw-on-A365 deployment to Hermes (the
   blueprint stays; only the runtime endpoint changes).
 
 Don't use when:
 
+- The goal is a **generic Teams chat bot** with no M365 directory
+  identity or Copilot surfacing — use Hermes' sibling Teams adapter
+  (`plugins/platforms/teams/`, shipped v2026.4.30). It handles
+  DM / channels / group / threading / file attachments via classic
+  Bot Framework without A365 prerequisites.
 - Generic Microsoft Graph access is the goal — use a Graph-only skill.
-- Deploying a Bot Framework bot **outside** A365 governance.
+- Deploying a Bot Framework bot **outside** any M365 / A365
+  governance surface — pick a classic BF skill.
 - Setting up OpenAI Agents SDK or another framework end-to-end — A365
   governs the runtime; pick the appropriate framework skill for the
   agent itself.
@@ -225,13 +262,25 @@ catalogue: [`references/activity-protocol-shapes.md`](references/activity-protoc
 operator-side network exposure options:
 [`references/exposing-the-bot-endpoint.md`](references/exposing-the-bot-endpoint.md).
 
-**Surfaces that work today:** Teams 1:1 chat (validated end-to-end
-across rounds 3–5). Teams group / channel paths are architecturally
-covered (`_activity_to_event` maps `chat_type`) but unwalked. M365
-Copilot Chat needs streaming (#3) and proactive replies (#4) before
-it ships; Outlook compose-action needs invoke handling (#18). See
-[`references/m365-surface-coverage.md`](references/m365-surface-coverage.md)
-for the per-surface matrix.
+**Surfaces that work today:**
+
+- **Path A (AI Teammate) Teams 1:1 chat** — validated end-to-end
+  across rounds 3 → 8, with BF streaming protocol round-trip
+  on round-8 (2026-05-11, v0.3.0). Agent appears in "Built for
+  your org" picker.
+- **Path B (Custom Engine Agent) manifest emitter** — shipped
+  2026-05-12 (slice 19u-a, `hermes a365 publish --copilot-chat`);
+  manifest validated by Teams App Catalog upload. **Live Copilot
+  Chat surfacing requires Azure Bot Service registration of the
+  blueprint Entra app**, deferred pending Azure subscription
+  decision (#16).
+
+Sibling-plugin lane (Teams group chat / channels / threading /
+file attachments / compose-extension invokes) is **out of scope
+for Hermes-A365** — use Hermes' classic Teams adapter for
+those. See [`references/m365-surface-coverage.md`](references/m365-surface-coverage.md)
+for the per-surface matrix and the architectural reasoning behind
+the split.
 
 ## Conflict resolution
 

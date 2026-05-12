@@ -4,67 +4,129 @@ Integrate Hermes agents into the Microsoft 365 ecosystem using
 **Microsoft Agent 365** (A365), the governance / identity / observability
 control plane that GA'd 2026-05-01.
 
+## Hermes-A365 vs sibling Hermes Teams plugins
+
+Hermes ships its own **classic-Bot-Framework Microsoft Teams adapter**
+(`plugins/platforms/teams/adapter.py`, shipped v2026.4.30; in-flight
+work in [hermes-agent#10037](https://github.com/NousResearch/hermes-agent/pull/10037)
+and [hermes-agent#13767](https://github.com/NousResearch/hermes-agent/pull/13767)).
+**That is the right tool when you want Hermes as a generic Teams chat
+bot** — DM, channels, group chats, threading, file attachments.
+Setup: Azure App Registration + client secret / certificate / Managed
+Identity + Teams app manifest with `bots[]`. No M365 tenant-directory
+identity, no Copilot Chat surfacing.
+
+**Hermes-A365 covers what classic Teams bots structurally can't:**
+
+| Path | Surfaces it lights up | Operator prerequisites | Status |
+|---|---|---|---|
+| **A — AI Teammate** (M365 agentic user) | Hermes appears as a first-class agentic identity in your M365 tenant directory + "Built for your org" picker + M365 People search + agentic-user audit trails. Teams 1:1 chat with M365-native identity. | M365 tenant + Frontier Preview Program + Tier 3 license. **No Azure subscription.** | ✅ Validated round-8 end-to-end 2026-05-11 with streaming (v0.3.0) |
+| **B — Custom Engine Agent** (Azure Bot Service + 1.21 manifest) | M365 Copilot Chat agents picker + side-panels in Word/Excel/PowerPoint/Outlook + Copilot-fabric search. Reaches classic Teams surfaces too as a side effect, but the sibling Teams adapter is the cleaner tool for those. | Path A's prerequisites **+ Azure subscription** for Bot Service registration of the blueprint Entra app with the Microsoft Teams channel enabled. | 🟡 Emitter shipped 2026-05-12 (`hermes a365 publish --copilot-chat`, slice 19u-a). Live Copilot Chat surfacing deferred pending Azure subscription ([#16](https://github.com/satscryption/Hermes-A365/issues/16)). |
+
+Both paths share the same blueprint Entra app, service principal, and
+bot endpoint, so an operator with both prerequisites can run both
+surfaces from one Hermes-A365 install. They are not mutually
+exclusive — and they are NOT in overlap with the sibling Teams
+adapter.
+
+**When to pick what:**
+
+- *"Hermes is a chat bot in Teams (DM / channels / group / file
+  uploads)"* → sibling Hermes Teams adapter (classic BF).
+- *"Hermes is a first-class agentic user in our M365 tenant directory"* →
+  Hermes-A365 Path A (AI Teammate).
+- *"Hermes surfaces in M365 Copilot Chat and Copilot side-panels"* →
+  Hermes-A365 Path B (Custom Engine Agent). Requires Azure
+  subscription.
+- *"All of the above"* → install both the sibling Teams adapter
+  AND Hermes-A365; configure each for its lane.
+
+See [`references/m365-surface-coverage.md`](references/m365-surface-coverage.md)
+for the full surface-by-surface matrix and the architectural
+reasoning behind the split.
+
 ## Status
 
-**v0.1.0** — first operator-targeted tag. Validated end-to-end against
-a Frontier-Preview-enrolled M365 tenant on Microsoft Teams 1:1 chat
-(rounds 3 → 5, last walked 2026-05-06 against CLI **1.1.171**). The
-secret-null regression-recovery path was re-walked round-6 against
-**1.1.174** (2026-05-07) — full end-to-end on 1.1.174 is not yet
-re-walked. **624 tests passing, ruff clean.** See [CHANGELOG.md](CHANGELOG.md)
-for the full release notes.
+**v0.3.0** (released 2026-05-11) + slice **19u-a** (Custom Engine
+Agent emitter, shipped 2026-05-12 on `main`, not yet tagged). 712
+tests passing, ruff clean. See [CHANGELOG.md](CHANGELOG.md) for
+the full release notes.
+
+Path A (AI Teammate) validated end-to-end against the satscryption
+M365 tenant rounds 3 → 8, including full BF streaming protocol
+round-trip on 2026-05-11 (closes [#3](https://github.com/satscryption/Hermes-A365/issues/3)).
+
+Path B (Custom Engine Agent) emitter shipped + manifest shape
+validated by Teams App Catalog upload 2026-05-12; live Copilot
+Chat round-trip deferred pending Azure subscription provisioning
+(see [#16](https://github.com/satscryption/Hermes-A365/issues/16)).
 
 ## What works today
 
 Lift of the per-surface matrix from
 [`references/m365-surface-coverage.md`](references/m365-surface-coverage.md).
-Legend: ✅ validated end-to-end · 🟢 architecturally covered, walk
-pending · 🟡 needs new code · 🔴 different runtime; would be a
-separate plugin · ⚪ out of scope.
+Legend: ✅ shipped + validated · 🟡 shipped, validation deferred ·
+🔵 sibling-plugin lane · 🔴 out of scope · ⚪ non-surface.
 
-| Surface | Status | Gating |
+| Surface | Best Hermes-stack path | Hermes-A365 coverage |
 |---|---|---|
-| **Microsoft Teams 1:1 chat** | ✅ | round-5 §9d walkthrough 2026-05-06 |
-| Teams group chat | 🟢 | adapter maps `chat_type=group`; live walk #17 |
-| Teams team channels (incl. threading) | 🟢 | minor `thread_id` extension; live walk #17 |
-| Mobile Teams | 🟢 | identical wire shape; not separately walked |
-| M365 Copilot Chat (standalone web app) | 🟡 | needs **#3 streaming** — Copilot Chat enforces a non-streaming reply timeout |
-| Outlook compose-action (`task/fetch` / `task/submit`) | 🟡 | needs **#18 invoke handlers** |
-| Teams compose extensions / Microsoft Search invokes | 🟡 | needs **#18 invoke handlers** |
-| Cron / proactive sends (any surface) | 🟡 | needs **#4 proactive** — `ConversationRef` registry already shipped |
-| Direct Line / web-chat / SharePoint embedded | 🟡 | bypasses A365 user-FIC; would need a separate auth path |
-| Slack / Telegram / WhatsApp / Twilio / Line / Kik / GroupMe | 🟢 | external-channel `chat_type` mapping; not a primary scope |
-| Word / Excel / PowerPoint Copilot side-panel (declarative) | 🔴 | declarative agents are a different runtime — Microsoft hosts the orchestrator |
-| Office Add-ins / Loop components / OneNote agent | 🔴 | different SDKs; would be separate complementary packages |
+| **Teams 1:1 chat with M365 agentic identity** | Hermes-A365 Path A | ✅ round-8 E2E + streaming 2026-05-11 |
+| Teams 1:1 chat (generic chat bot, no M365 identity) | Sibling Teams adapter | 🔵 use sibling |
+| Teams group chat / channel / meetings | Sibling Teams adapter | 🔵 use sibling |
+| Teams file attachments (image, PDF, DOCX, …) | Sibling Teams adapter (PR #13767) | 🔵 use sibling |
+| **M365 Copilot Chat (standalone)** | Hermes-A365 Path B | 🟡 emitter shipped; needs Azure (#16) |
+| Word / Excel / PowerPoint Copilot side-panels (Hermes as Copilot agent) | Hermes-A365 Path B | 🟡 same Custom Engine Agent registration |
+| Outlook — Copilot Chat side-panel inside Outlook | Hermes-A365 Path B | 🟡 same |
+| Microsoft Search invocation | Hermes-A365 Path B + #18 | 🟡 needs Azure + invoke handlers |
+| Outlook compose-action (`task/fetch` / `task/submit`) | Path B (Copilot fabric) or sibling adapter | 🟡 / 🔵 |
+| Teams compose extensions (`composeExtension/*`) | Sibling Teams adapter | 🔵 use sibling |
+| Cron / proactive sends on M365 surfaces | Hermes-A365 + #4 | 🟡 `ConversationRef` registry shipped, agent-side trigger pending |
+| Word / Excel / PowerPoint as declarative Copilot agents | Separate skill | 🔴 different runtime |
+| Office Add-ins / Loop / OneNote | Separate skills | 🔴 different SDKs |
+| Web chat / Direct Line / SharePoint Embedded | Separate Direct Line skill | 🔴 bypasses M365 |
+| Slack / Telegram / WhatsApp / etc. | Use Hermes' respective platform adapters | 🔵 use the dedicated adapter |
 
 ## Known limitations
 
-`v0.1.0` ships the operator wrapper, the read path, and the Bot
-Framework activity bridge that backs the Hermes `agent365` gateway
-platform. Several surfaces and operator ergonomics are explicitly
-**not** in this tag:
+v0.3.0 ships the operator wrapper, read path, Bot Framework activity
+bridge, streaming protocol, setup wizard, and (post-tag, on `main`)
+the Custom Engine Agent emitter for Path B. Outstanding gaps:
 
-- **M365 Copilot Chat streaming** is not implemented
-  ([#3](https://github.com/satscryption/Hermes-A365/issues/3)).
-  `Agent365Adapter.edit_message` is a no-op and `REQUIRES_EDIT_FINALIZE`
-  is unset. Copilot Chat surface (#16) is gated on this.
+- **Path B (Copilot Chat) needs Azure subscription.** Custom Engine
+  Agent surfacing in Copilot Chat requires registering the blueprint
+  Entra app as an Azure Bot Service resource with the Microsoft Teams
+  channel enabled — confirmed during the 2026-05-12 live walkthrough.
+  Without Azure, the 1.21 manifest uploads to the Teams App Catalog
+  cleanly but Microsoft's routing layer doesn't forward Copilot Chat
+  activities to our endpoint. The agent stays AI-Teammate-shaped
+  (instance creation → Teams notification only).
+  [#16](https://github.com/satscryption/Hermes-A365/issues/16) tracks
+  the live walkthrough once Azure is provisioned.
 - **Proactive replies for >10 s agent thinking** are not implemented
   ([#4](https://github.com/satscryption/Hermes-A365/issues/4)). `send()`
   still requires a cached inbound; cron-driven sends do not work yet.
-- **`hermes gateway setup` wizard** is not yet shipped
-  ([#13](https://github.com/satscryption/Hermes-A365/issues/13)).
-  Operators must hand-edit `~/.hermes/config.yaml` and `~/.hermes/.env`
-  per the [Operator setup](#operator-setup) section below.
-- **Invoke activities** (Outlook compose-action, Teams compose
-  extensions, search, signin/verifyState) are tracked under
-  [#18](https://github.com/satscryption/Hermes-A365/issues/18); umbrella
-  not yet implemented.
+  Applies to both paths.
+- **Invoke activities (Path B)** — Outlook compose-action
+  (`task/fetch` / `task/submit`), Microsoft Search invocation, and
+  OAuth invoke (`signin/verifyState`) for tools inside Copilot Chat
+  are tracked under [#18](https://github.com/satscryption/Hermes-A365/issues/18);
+  umbrella not yet implemented. Teams compose-extension invokes
+  (`composeExtension/*`) are sibling-plugin lane, not Hermes-A365's.
+- **Setup wizard XDG symlink gap** — the GA `a365` CLI reads
+  `~/.config/a365/a365.generated.config.json` but our wizard places
+  the generated config at the operator-configurable
+  `A365_GENERATED_CONFIG_PATH`. Without a symlink, `a365 publish`
+  fails. Tracked as
+  [#25](https://github.com/satscryption/Hermes-A365/issues/25).
+- **`--manifest-id` flag for Path B** — operators running A + B
+  simultaneously against the same tenant hit a Teams App Catalog
+  duplicate-id rejection because the transformer preserves
+  `manifest.id`. Workaround: manually patch a fresh uuid4 into
+  `manifest.id` before upload. Proper fix in
+  [#26](https://github.com/satscryption/Hermes-A365/issues/26).
 - **Plaintext on-disk secret on macOS / Linux.** DPAPI is Windows-only;
   on macOS / Linux the GA CLI writes the agent blueprint client secret
   to `a365.generated.config.json` in plaintext. See [Security model](#security-model).
-- **End-to-end re-walk on CLI 1.1.174** has not yet been done. Round-6
-  validated only the `register --apply` regression-recovery flow against
-  1.1.174; round-5 (1.1.171) is the last full E2E walkthrough.
 - **macOS 26 device-code prompt volume.** On macOS 26.x the GA `a365`
   CLI falls back to device-code per Entra-side mutation, so `register
   --apply --m365` hits ~10–12 prompts instead of 1–2. Documented in
