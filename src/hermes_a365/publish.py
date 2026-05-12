@@ -57,6 +57,8 @@ class PublishInputs:
     agent_name: str
     tenant_id: str | None = None
     aiteammate: bool = False  # blueprint-only by default per CLI default
+    copilot_chat: bool = False  # slice 19u-a (#24): Custom Engine Agent emit
+    bot_id: str | None = None  # optional override for the Copilot Chat botId
     use_blueprint: bool = False  # blueprint-based non-DW flow (only with aiteammate=False)
     verbose: bool = False
 
@@ -65,6 +67,8 @@ class PublishInputs:
             raise ValueError("agent_name must be non-empty")
         if self.use_blueprint and self.aiteammate:
             raise ValueError("--use-blueprint is only meaningful with --aiteammate false")
+        if self.use_blueprint and self.copilot_chat:
+            raise ValueError("--use-blueprint is incompatible with --copilot-chat")
 
 
 # ---------------------------------------------------------------------------
@@ -89,16 +93,32 @@ class PublishPlan:
             lines.append(f"  tenant: {self.inputs.tenant_id}")
         else:
             lines.append("  tenant: (auto-detect from `az account show`)")
-        flavour = "AI Teammate" if self.inputs.aiteammate else "blueprint-only"
+        if self.inputs.aiteammate and self.inputs.copilot_chat:
+            flavour = "AI Teammate + Custom Engine Agent (both surfaces)"
+        elif self.inputs.copilot_chat:
+            flavour = "Custom Engine Agent (Copilot Chat)"
+        elif self.inputs.aiteammate:
+            flavour = "AI Teammate"
+        else:
+            flavour = "blueprint-only"
         lines.append(f"  flavour: {flavour}")
-        # Slice 18t (bug #14): be explicit about what this run will produce
-        # so operators know whether to wait for an admin-centre upload step.
-        if self.inputs.aiteammate:
+        # Slice 18t (bug #14) + 19u-a (#24): be explicit about what this
+        # run will produce so operators know which admin centre to hit.
+        if self.inputs.aiteammate and self.inputs.copilot_chat:
+            lines.append(
+                "  output:  AI Teammate zip (M365 Admin Centre) + "
+                "Copilot Chat zip (Teams Admin Center)"
+            )
+        elif self.inputs.copilot_chat:
+            lines.append("  output:  Custom Engine Agent zip for Teams Admin Center upload")
+        elif self.inputs.aiteammate:
             lines.append("  output:  manifest zip for M365 Admin Centre upload")
         else:
             lines.append("  output:  Graph API instance registration (no zip)")
         if self.inputs.use_blueprint:
             lines.append("  flow:    blueprint-based non-DW (explicit)")
+        if self.inputs.bot_id:
+            lines.append(f"  bot-id:  {self.inputs.bot_id} (override)")
         lines.append(f"  step:    {self.step.description}")
         # shlex.join (slice 18p, bug #7) keeps multi-word values quoted
         # so the printed line is shell-pasteable verbatim.
@@ -110,7 +130,11 @@ def _build_argv(inputs: PublishInputs) -> list[str]:
     argv = ["a365", "publish", "--agent-name", inputs.agent_name]
     if inputs.tenant_id:
         argv.extend(["--tenant-id", inputs.tenant_id])
-    if inputs.aiteammate:
+    # Slice 19u-a: the GA CLI only emits a starter zip when invoked with
+    # ``--aiteammate``. The Copilot Chat flow post-processes that zip
+    # into a Custom Engine Agent shape, so it must also invoke the CLI
+    # in AI Teammate mode underneath.
+    if inputs.aiteammate or inputs.copilot_chat:
         argv.append("--aiteammate")
     if inputs.use_blueprint:
         argv.append("--use-blueprint")
@@ -120,6 +144,10 @@ def _build_argv(inputs: PublishInputs) -> list[str]:
 
 
 def _step_description(inputs: PublishInputs) -> str:
+    if inputs.aiteammate and inputs.copilot_chat:
+        return "package both AI Teammate + Custom Engine Agent manifests"
+    if inputs.copilot_chat:
+        return "package the Custom Engine Agent manifest for Teams Admin Center upload"
     if inputs.aiteammate:
         return "package the agent manifest for M365 Admin Centre upload"
     return "register agent instance via Microsoft Graph (no zip emitted)"
@@ -146,6 +174,9 @@ class PublishResult:
     raw: RunResult
     package_path: str | None  # set on AI Teammate flow if a zip was produced
     instance_id: str | None  # set on blueprint-only flow if registration succeeded
+    # Slice 19u-a (#24): Custom Engine Agent zip produced for Copilot Chat.
+    copilot_chat_package_path: str | None = None
+    copilot_chat_bot_id: str | None = None
     messages: list[str] = field(default_factory=list)
 
 
@@ -260,6 +291,145 @@ def _patch_manifest_name_short(zip_path: str) -> tuple[str, str] | None:
     return (short, new_short)
 
 
+# ---------------------------------------------------------------------------
+# Slice 19u-a (#24): Custom Engine Agent manifest emit for Copilot Chat
+# ---------------------------------------------------------------------------
+#
+# Microsoft surfaces two parallel manifest shapes from the same blueprint
+# Entra app:
+#
+# - **AI Teammate** (``manifestVersion: "devPreview"``,
+#   ``agenticUserTemplates`` block) — surfaces in Teams 1:1 "Built for
+#   your org". Emitted by the GA CLI's ``a365 publish --aiteammate``.
+# - **Custom Engine Agent** (``manifestVersion: "1.21"``+, ``bots`` +
+#   ``copilotAgents.customEngineAgents`` blocks) — surfaces in M365
+#   Copilot Chat's agents picker.
+#
+# The GA CLI doesn't ship a Copilot Chat emitter. We invoke it in AI
+# Teammate mode (the side effect — Entra app + service principal —
+# is the same bot identity for both surfaces) and post-process the
+# emitted zip into the 1.21 shape.
+
+_COPILOT_CHAT_MANIFEST_VERSION = "1.21"
+_COPILOT_CHAT_DEFAULT_SCOPES: tuple[str, ...] = ("personal",)
+_COPILOT_CHAT_ZIP_INFIX = ".copilot-chat"
+
+
+def _transform_manifest_to_copilot_chat(
+    manifest: dict,
+    *,
+    bot_id: str,
+    scopes: tuple[str, ...] = _COPILOT_CHAT_DEFAULT_SCOPES,
+) -> dict:
+    """Pure transform: AI Teammate manifest dict → Custom Engine Agent shape."""
+    out = dict(manifest)
+    out["manifestVersion"] = _COPILOT_CHAT_MANIFEST_VERSION
+    # ``agenticUserTemplates`` is the AI Teammate shape and is not part
+    # of the 1.21+ schema; strip it.
+    out.pop("agenticUserTemplates", None)
+    out["bots"] = [
+        {
+            "botId": bot_id,
+            "scopes": list(scopes),
+            "supportsCalling": False,
+            "supportsVideo": False,
+            "supportsFiles": False,
+        }
+    ]
+    out["copilotAgents"] = {
+        "customEngineAgents": [
+            {"type": "bot", "id": bot_id},
+        ]
+    }
+    return out
+
+
+def _extract_bot_id_from_manifest(manifest: dict) -> str | None:
+    """Best-effort grab of the bot/app id from an AI Teammate manifest."""
+    wai = manifest.get("webApplicationInfo")
+    if isinstance(wai, dict):
+        bot_id = wai.get("id")
+        if isinstance(bot_id, str) and bot_id:
+            return bot_id
+    bots = manifest.get("bots")
+    if isinstance(bots, list) and bots:
+        first = bots[0]
+        if isinstance(first, dict):
+            bid = first.get("botId")
+            if isinstance(bid, str) and bid:
+                return bid
+    return None
+
+
+def _patch_manifest_to_copilot_chat(
+    zip_path: str,
+    *,
+    bot_id_override: str | None = None,
+    scopes: tuple[str, ...] = _COPILOT_CHAT_DEFAULT_SCOPES,
+) -> tuple[str, dict] | None:
+    """Rewrite ``manifest.json`` inside *zip_path* into a Custom Engine
+    Agent shape. Returns ``(bot_id_used, summary)`` on success, ``None``
+    on any failure (file missing, no manifest.json, bad json, can't
+    determine bot id). Best-effort: any I/O failure leaves the original
+    zip untouched.
+    """
+    import json
+    import tempfile
+    import zipfile
+    from pathlib import Path
+
+    zp = Path(zip_path)
+    if not zp.is_file():
+        return None
+    try:
+        with zipfile.ZipFile(zp, "r") as zf:
+            names = zf.namelist()
+            if "manifest.json" not in names:
+                return None
+            with zf.open("manifest.json") as fh:
+                manifest = json.load(fh)
+            other_files = {n: zf.read(n) for n in names if n != "manifest.json"}
+    except (OSError, zipfile.BadZipFile, json.JSONDecodeError):
+        return None
+
+    bot_id = bot_id_override or _extract_bot_id_from_manifest(manifest)
+    if not bot_id:
+        return None
+
+    had_aut = "agenticUserTemplates" in manifest
+    new_manifest = _transform_manifest_to_copilot_chat(
+        manifest, bot_id=bot_id, scopes=scopes
+    )
+    blob = json.dumps(new_manifest, indent=2).encode("utf-8")
+
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=str(zp.parent), prefix=zp.name + ".", suffix=".tmp", delete=False
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", blob)
+            for name, b in other_files.items():
+                zf.writestr(name, b)
+        tmp_path.replace(zp)
+    except OSError:
+        import contextlib
+
+        if tmp_path is not None:
+            with contextlib.suppress(Exception):
+                tmp_path.unlink(missing_ok=True)
+        return None
+
+    summary = {
+        "manifest_version": _COPILOT_CHAT_MANIFEST_VERSION,
+        "bot_id": bot_id,
+        "scopes": list(scopes),
+        "dropped_agentic_user_templates": had_aut,
+    }
+    return (bot_id, summary)
+
+
 def _extract_instance_id(output: str) -> str | None:
     """Grep for the registered instance id in blueprint-only flow output."""
     match = _INSTANCE_ID_RE.search(output)
@@ -273,28 +443,108 @@ def apply_publish_plan(
 ) -> PublishResult:
     """Run ``a365 publish``; surface the produced artefact (zip or
     registered instance) appropriate to the flow."""
+    from pathlib import Path
+    from shutil import copyfile
+
     run = mutator.run(plan.step.argv, timeout=180.0)
     package_path: str | None = None
+    copilot_chat_package_path: str | None = None
+    copilot_chat_bot_id: str | None = None
     instance_id: str | None = None
     messages: list[str] = [f"[apply] {plan.step.description} — done"]
 
-    if plan.inputs.aiteammate:
-        package_path = _extract_package_path(run.combined)
-        if package_path:
-            # Slice 19r-c: post-process the emitted zip to keep
-            # name.short ≤ 30 chars (Admin Centre rejects > 30).
-            patched = _patch_manifest_name_short(package_path)
-            if patched is not None:
-                old, new = patched
-                messages.append(
-                    f"[apply] truncated name.short: "
-                    f"{old!r} ({len(old)} chars) → {new!r} ({len(new)} chars) "
-                    "to satisfy the 30-char Admin Centre cap"
+    if plan.inputs.aiteammate or plan.inputs.copilot_chat:
+        emitted_zip = _extract_package_path(run.combined)
+        if emitted_zip:
+            # Decide which file we end up calling the Copilot Chat zip.
+            # - Both surfaces requested → copy the CLI-emitted zip aside
+            #   to a sibling ``.copilot-chat.zip`` and transform the copy
+            #   (the original stays as the AI Teammate zip).
+            # - Copilot Chat only → transform the CLI-emitted zip in
+            #   place; no AI Teammate zip is kept.
+            # - AI Teammate only → no transform; keep emitted as-is.
+            if plan.inputs.copilot_chat and plan.inputs.aiteammate:
+                orig = Path(emitted_zip)
+                sibling = orig.with_name(
+                    orig.stem + _COPILOT_CHAT_ZIP_INFIX + orig.suffix
                 )
-            messages.append(f"[apply] package: {package_path}")
-        messages.append(
-            f"[apply] next: upload the package to the M365 Admin Centre at {ADMIN_CENTRE_URL}"
-        )
+                copyfile(orig, sibling)
+                copilot_chat_target: str | None = str(sibling)
+                package_path = emitted_zip
+            elif plan.inputs.copilot_chat:
+                copilot_chat_target = emitted_zip
+                package_path = None
+            else:
+                copilot_chat_target = None
+                package_path = emitted_zip
+
+            if copilot_chat_target is not None:
+                cc_result = _patch_manifest_to_copilot_chat(
+                    copilot_chat_target, bot_id_override=plan.inputs.bot_id
+                )
+                if cc_result is not None:
+                    copilot_chat_bot_id, summary = cc_result
+                    copilot_chat_package_path = copilot_chat_target
+                    dropped = " (dropped agenticUserTemplates)" if summary[
+                        "dropped_agentic_user_templates"
+                    ] else ""
+                    messages.append(
+                        f"[apply] transformed to Custom Engine Agent: "
+                        f"manifestVersion={summary['manifest_version']}, "
+                        f"botId={copilot_chat_bot_id}, "
+                        f"scopes={summary['scopes']}" + dropped
+                    )
+                else:
+                    messages.append(
+                        "[apply] WARNING: Copilot Chat transform failed "
+                        "(no bot id found or zip unreadable); "
+                        "pass --bot-id to override"
+                    )
+                    # Roll back the sibling copy so we don't leave a
+                    # half-baked zip behind.
+                    if (
+                        plan.inputs.copilot_chat
+                        and plan.inputs.aiteammate
+                        and copilot_chat_target != emitted_zip
+                    ):
+                        import contextlib
+
+                        with contextlib.suppress(OSError):
+                            Path(copilot_chat_target).unlink(missing_ok=True)
+
+            # Slice 19r-c: post-process emitted zip(s) to keep name.short
+            # ≤ 30 chars (Admin Centre rejects > 30). Applies to either
+            # the AI Teammate zip or the Copilot Chat zip — both feed
+            # admin-centre uploads that enforce the same cap.
+            for zp in [p for p in (package_path, copilot_chat_package_path) if p]:
+                patched = _patch_manifest_name_short(zp)
+                if patched is not None:
+                    old, new = patched
+                    fname = Path(zp).name
+                    messages.append(
+                        f"[apply] truncated name.short in {fname}: "
+                        f"{old!r} ({len(old)} chars) → {new!r} ({len(new)} chars) "
+                        "to satisfy the 30-char Admin Centre cap"
+                    )
+
+        # AI Teammate upload reminder is unconditional (matches pre-19u-a
+        # behaviour — the CLI sometimes prints the zip path in a phrasing
+        # we don't recognise, but the operator still needs to upload it).
+        if plan.inputs.aiteammate:
+            if package_path:
+                messages.append(f"[apply] AI Teammate package: {package_path}")
+            messages.append(
+                f"[apply] AI Teammate next: upload the package to the "
+                f"M365 Admin Centre at {ADMIN_CENTRE_URL}"
+            )
+        if copilot_chat_package_path:
+            messages.append(
+                f"[apply] Copilot Chat package: {copilot_chat_package_path}"
+            )
+            messages.append(
+                "[apply] Copilot Chat next: upload to Teams Admin Center → "
+                "Manage apps → Upload + assign per-user policy"
+            )
     else:
         instance_id = _extract_instance_id(run.combined)
         if instance_id:
@@ -308,6 +558,8 @@ def apply_publish_plan(
         raw=run,
         package_path=package_path,
         instance_id=instance_id,
+        copilot_chat_package_path=copilot_chat_package_path,
+        copilot_chat_bot_id=copilot_chat_bot_id,
         messages=messages,
     )
 
@@ -333,6 +585,23 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         help="treat as AI Teammate (creates Entra user); default is blueprint-only",
     )
     parser.add_argument(
+        "--copilot-chat",
+        action="store_true",
+        help=(
+            "emit a Custom Engine Agent manifest (manifestVersion 1.21, "
+            "bots + copilotAgents blocks) for M365 Copilot Chat upload; "
+            "combine with --aiteammate to emit both surfaces"
+        ),
+    )
+    parser.add_argument(
+        "--bot-id",
+        help=(
+            "override the botId used in the Copilot Chat manifest; "
+            "default extracts it from the emitted manifest's "
+            "webApplicationInfo.id"
+        ),
+    )
+    parser.add_argument(
         "--use-blueprint",
         action="store_true",
         help="use blueprint-based non-DW flow (only with --aiteammate false)",
@@ -348,6 +617,8 @@ def run(args: argparse.Namespace) -> int:
             agent_name=args.agent_name,
             tenant_id=args.tenant_id,
             aiteammate=args.aiteammate,
+            copilot_chat=args.copilot_chat,
+            bot_id=args.bot_id,
             use_blueprint=args.use_blueprint,
             verbose=args.verbose,
         )

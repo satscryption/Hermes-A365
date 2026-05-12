@@ -285,12 +285,20 @@ hermes a365 consent "Inbox Helper" --no-open
 hermes a365 instance create inbox-helper \
     --owner sadiq@contoso.com --owner-aad-id <oid> --apply
 
-# 6. Package the AI Teammate manifest zip for admin-centre upload
+# 6. Package the manifest zip for admin-centre upload.
+#    --aiteammate alone:  AI Teammate manifest (Teams 1:1 "Built for your org");
+#                         upload at M365 Admin Centre.
+#    --copilot-chat alone: Custom Engine Agent manifest (M365 Copilot Chat
+#                         agents picker); upload at Teams Admin Center.
+#    --aiteammate --copilot-chat: both zips side-by-side (Copilot Chat zip
+#                         lands at <original>.copilot-chat.zip).
 hermes a365 publish --agent-name "Inbox Helper" --aiteammate --apply
 
 # 7. Operator: in M365 Admin Centre → Agents → All agents → Upload
 #    custom agent, upload the zip emitted by step 6, then activate
 #    the agent for each target user under Agent 365 admin centre.
+#    (For --copilot-chat zips, upload at Teams Admin Center →
+#     Manage apps → Upload + assign per-user policy.)
 
 # 8. Re-point the messaging endpoint at whatever public HTTPS URL
 #    fronts your local port 3978. The skill is tunnel-agnostic —
@@ -392,7 +400,8 @@ hermes a365 register --agent-name "<display>" [--m365] [--aiteammate] \
     [--no-endpoint] [--auto-recover-secret] [--apply]
 hermes a365 consent "<agent-name>" [--no-open] [--timeout 60]
 hermes a365 instance create <slug> --owner <email> --owner-aad-id <oid> [--apply]
-hermes a365 publish --agent-name "<display>" [--aiteammate] [--apply]
+hermes a365 publish --agent-name "<display>" [--aiteammate] [--copilot-chat] \
+    [--bot-id <guid>] [--apply]
 hermes a365 cleanup --agent-name "<display>" [--slug <slug>] [--kinds=...] \
     [--purge-orphans] [--orphan-instance-id <guid>] --apply --confirm "<display>"
 

@@ -6,6 +6,21 @@ follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Slice 19u-a (#24):** `hermes a365 publish --copilot-chat` emits a
+  **Custom Engine Agent** manifest zip for M365 Copilot Chat. The
+  flag post-processes the GA CLI's AI Teammate zip into a
+  `manifestVersion: "1.21"` shape with `bots` (referencing the
+  blueprint Entra app id) and `copilotAgents.customEngineAgents`
+  blocks; AI Teammate-specific `agenticUserTemplates` is stripped.
+  Combine with `--aiteammate` to emit both zips side-by-side (the
+  Copilot Chat zip lands at `<original>.copilot-chat.zip`); the
+  `name.short` 30-char truncation (slice 19r-c) applies to both.
+  `--bot-id` overrides botId extraction (default reads
+  `webApplicationInfo.id` from the emitted manifest). Unblocks #16
+  (Copilot Chat live walkthrough).
+
 ## [0.3.0] — 2026-05-11
 
 Feature release: Bot Framework streaming-response protocol. Closes
