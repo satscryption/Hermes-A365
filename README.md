@@ -47,10 +47,11 @@ reasoning behind the split.
 
 ## Status
 
-**v0.3.0** (released 2026-05-11) + slice **19u-a** (Custom Engine
-Agent emitter, shipped 2026-05-12 on `main`, not yet tagged). 712
-tests passing, ruff clean. See [CHANGELOG.md](CHANGELOG.md) for
-the full release notes.
+**v0.4.0** (released 2026-05-12) bundles slice 19u-a (Custom Engine
+Agent emitter for Path B), the M365-ecosystem positioning reframe,
+and the setup-wizard hardening pass (XDG symlink + slug + YAML diff
+noise). 720 tests passing, ruff clean. See
+[CHANGELOG.md](CHANGELOG.md) for the full release notes.
 
 Path A (AI Teammate) validated end-to-end against the satscryption
 M365 tenant rounds 3 → 8, including full BF streaming protocol
@@ -60,6 +61,7 @@ Path B (Custom Engine Agent) emitter shipped + manifest shape
 validated by Teams App Catalog upload 2026-05-12; live Copilot
 Chat round-trip deferred pending Azure subscription provisioning
 (see [#16](https://github.com/satscryption/Hermes-A365/issues/16)).
+v0.5.0 reserved for that walkthrough.
 
 ## What works today
 
@@ -88,9 +90,10 @@ Legend: ✅ shipped + validated · 🟡 shipped, validation deferred ·
 
 ## Known limitations
 
-v0.3.0 ships the operator wrapper, read path, Bot Framework activity
-bridge, streaming protocol, setup wizard, and (post-tag, on `main`)
-the Custom Engine Agent emitter for Path B. Outstanding gaps:
+v0.4.0 ships the operator wrapper, read path, Bot Framework activity
+bridge, BF streaming protocol, hardened setup wizard (with XDG-symlink
+auto-repair), and the Custom Engine Agent emitter for Path B.
+Outstanding gaps:
 
 - **Path B (Copilot Chat) needs Azure subscription.** Custom Engine
   Agent surfacing in Copilot Chat requires registering the blueprint
@@ -112,12 +115,6 @@ the Custom Engine Agent emitter for Path B. Outstanding gaps:
   are tracked under [#18](https://github.com/satscryption/Hermes-A365/issues/18);
   umbrella not yet implemented. Teams compose-extension invokes
   (`composeExtension/*`) are sibling-plugin lane, not Hermes-A365's.
-- **Setup wizard XDG symlink gap** — the GA `a365` CLI reads
-  `~/.config/a365/a365.generated.config.json` but our wizard places
-  the generated config at the operator-configurable
-  `A365_GENERATED_CONFIG_PATH`. Without a symlink, `a365 publish`
-  fails. Tracked as
-  [#25](https://github.com/satscryption/Hermes-A365/issues/25).
 - **`--manifest-id` flag for Path B** — operators running A + B
   simultaneously against the same tenant hit a Teams App Catalog
   duplicate-id rejection because the transformer preserves
@@ -264,7 +261,7 @@ v0.1 design draft is archived at
 │           ├── consent-url.txt.j2
 │           ├── instance.env.j2
 │           └── adaptive-cards/      # greeting / confirmation / error
-└── tests/                   # 624 tests (pytest + ruff clean)
+└── tests/                   # 720 tests (pytest + ruff clean)
     ├── conftest.py
     ├── golden/
     └── test_*.py
@@ -401,14 +398,20 @@ platform into Hermes:
 hermes gateway setup --platform agent365
 ```
 
-The wizard (shipped in v0.2.0) prompts through the generated-config
-path, tenant id, blueprint app id, slug, port, secret bootstrap, and
-allow-all toggle. It patches `~/.hermes/.env` (env vars) and
-`~/.hermes/config.yaml` (`plugins.enabled` + `gateway.platforms.agent365`
-block) and is fully idempotent — re-running detects existing values,
-offers update-vs-keep, and surfaces drift (stale `A365_APP_ID`, orphan
-slugs, missing `tenantId`/`clientAppId` in `~/a365.config.json`,
-unreachable `generated_config_path`) with auto-fixers where possible.
+The wizard (slice 19r in v0.2.0; hardened in v0.4.0 by 19r-bis +
+19r-a-bis) prompts through the generated-config path, tenant id,
+blueprint app id, slug, port, secret bootstrap, and allow-all
+toggle. It patches `~/.hermes/.env` (env vars) and
+`~/.hermes/config.yaml` (`plugins.enabled` +
+`gateway.platforms.agent365` block) and is fully idempotent —
+re-running detects existing values, offers update-vs-keep, and
+surfaces drift (stale `A365_APP_ID`, orphan slugs, missing
+`tenantId` / `clientAppId` in `~/a365.config.json`, unreachable
+`generated_config_path`, **missing or wrong-target XDG symlink at
+`~/.config/a365/a365.generated.config.json`**) with auto-fixers
+where possible. The `config.yaml` write is skipped when the
+agent365 stanza hasn't materially changed, keeping the file
+git-reviewable across wizard re-runs.
 
 After the wizard, source the per-agent .env into the gateway's process
 shell so the adapter inherits the runtime config, then start the
@@ -511,40 +514,48 @@ External issues filed:
   Q1 contract turned out to already exist in the harness; awaiting
   NousResearch guidance on naming + placement.
 
-Open issues in this repo (run `gh issue list` for current state):
+Open issues in this repo (run `gh issue list` for current state).
+Issues are tagged with `priority:next` / `priority:ready` /
+`priority:conditional` / `blocked` / `deferred-pending-demand`
+labels — `gh issue list --label "priority:ready"` surfaces the
+working set.
 
-**Active build tracks:**
+**Ready to work** (no external blockers):
 
-- **[#3](../../issues/3)** — Activity bridge streaming responses.
-  **Hard prerequisite for #16** (M365 Copilot Chat surface validation
-  per slice 19u) — Copilot Chat enforces a ~15s non-streaming reply
-  timeout.
 - **[#4](../../issues/4)** — Proactive long-running reply pattern.
-  Surface-agnostic. Slice 19o registry (`ConversationRef` +
-  `conversations.json`) is the **already-shipped** prerequisite;
-  what's missing is the Hermes-side trigger.
+  Surface-agnostic; applies to both paths and the sibling Teams
+  adapter independently. Slice 19o registry (`ConversationRef` +
+  `conversations.json`) is the already-shipped prerequisite;
+  what's missing is the Hermes-side trigger. `priority:ready`.
 
-**Surface-validation walkthroughs:**
+**Conditional on operator signal:**
+
+- **[#26](../../issues/26)** — `--manifest-id` flag to avoid Teams
+  App Catalog duplicate-id rejection when both AI Teammate and
+  Custom Engine Agent zips are published against the same tenant.
+  Pick up if Azure provisioning becomes concrete (otherwise the
+  manual `uuid4()` workaround is fine). `priority:conditional`.
+
+**Blocked on Azure subscription provisioning:**
 
 - **[#16](../../issues/16)** — Slice 19u: validate M365 Copilot Chat
-  surface (gates on #3).
-- **[#17](../../issues/17)** — Slice 19v: validate Teams group +
-  channel surfaces (architecturally covered, just needs a live walk).
-
-**Adapter quality / operator UX:**
-
-- **[#13](../../issues/13)** — Slice 19r: `interactive_setup()` for
-  `hermes gateway setup` wizard. Surface-agnostic.
+  surface end-to-end. **Path B's primary validation.** Custom Engine
+  Agent emitter shipped (slice 19u-a, v0.4.0); the live surfacing
+  test requires Azure Bot Service registration of the blueprint
+  Entra app with the Microsoft Teams channel enabled. Same Azure
+  registration also lights up the Copilot side-panels +
+  Microsoft Search invokes.
 - **[#18](../../issues/18)** — Slice 19w: handle invoke activities
   (BF wire-protocol). Foundation slices 19w-a (typed dispatch +
   `InvokeContext` + response builders) and 19w-b (generalised
   `TokenFactory`) land first; per-name children 19w-c..g handle
-  `task/{fetch,submit}` + `adaptiveCard/action`,
-  `composeExtension/*`, `signin/{verifyState,tokenExchange}`,
-  `search` + `searchMessageExtension/query`, and invoke-aware
-  idempotency replay independently after that. Work IQ V2 amplifier
-  work (search-invoke fast-path, auto-grounding, V2 token bootstrap)
-  split out to [#21](../../issues/21). Supersedes the older #5.
+  Path B-relevant invokes (`task/{fetch,submit}` via Copilot
+  side-panel, `signin/verifyState`, `search`,
+  `searchMessageExtension/query`) and invoke-aware idempotency
+  replay. Compose-extension invokes (`composeExtension/*`) moved
+  to sibling-Teams-adapter lane under the 2026-05-12 reframe.
+  Effectively gated on #16. Work IQ V2 amplifier work split out
+  to [#21](../../issues/21). Supersedes the older #5.
 
 **Deferred (pending operator demand):**
 
@@ -580,6 +591,36 @@ explicit triggers that would re-prioritise it.
 
 **Recent closures:**
 
+- ~~#25~~ — Setup wizard XDG symlink gap. **Closed 2026-05-12**
+  in v0.4.0 (slice 19r-bis). Wizard now creates / repairs a
+  symlink at `~/.config/a365/a365.generated.config.json` pointing
+  at the operator's `A365_GENERATED_CONFIG_PATH`. Drift check
+  surfaces `xdg_symlink_missing` / `xdg_symlink_wrong_target`
+  with auto-fixer.
+- ~~#24~~ — Custom Engine Agent publish path for Copilot Chat
+  surface. **Closed 2026-05-12** in v0.4.0 (slice 19u-a).
+  `hermes a365 publish --copilot-chat` emits a 1.21 manifest;
+  optional `--bot-id` overrides; combine with `--aiteammate` for
+  side-by-side zips. Live Copilot Chat surfacing tracked
+  separately under [#16](../../issues/16) — additionally needs
+  Azure Bot Service registration.
+- ~~#22~~ — Setup wizard polish (slug + YAML diff noise).
+  **Closed 2026-05-12** in v0.4.0 (slice 19r-a-bis). Slug
+  prompt uses `prompt_choice` when >1 agent dirs;
+  `~/.hermes/config.yaml` write skipped when stanza unchanged.
+- ~~#17~~ — Slice 19v: Teams group + channel walkthrough.
+  **Closed 2026-05-12** as superseded by the M365-ecosystem
+  reframe. Teams group / channel surfaces are
+  sibling-plugin-lane (classic Bot Framework via Hermes'
+  `plugins/platforms/teams/`); Hermes-A365 doesn't own this
+  surface.
+- ~~#13~~ — Slice 19r: `interactive_setup()` for
+  `hermes gateway setup` wizard. **Closed 2026-05-11** in v0.2.0.
+  Hardened further in v0.4.0 (slice 19r-bis + 19r-a-bis, closing
+  #25 + #22).
+- ~~#3~~ — Activity bridge streaming responses. **Closed
+  2026-05-11** in v0.3.0 (slices 19s + 19s-bis). Validated
+  end-to-end in round-8 Teams 1:1 walkthrough.
 - ~~#14~~ — GA CLI client-secret persistence regression. **Closed
   2026-05-07** after slice 19s shipped layer 1 (detection +
   `--auto-recover-secret` flag) and round-6 walkthrough validated
