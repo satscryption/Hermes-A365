@@ -6,6 +6,41 @@ follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-05-12
+
+Patch release: documentation accuracy pass for v0.4.0 + CI workflow
+modernisation. No code changes.
+
+### Documented
+
+- **README.md** refreshed for v0.4.0 across §Status, §Known
+  limitations, §Repo layout, §Operator setup (wizard description
+  + XDG-symlink drift item), and §Open work (restructured around
+  the new `priority:next|ready|conditional|blocked` labels; #3,
+  #13, #17, #22, #24, #25 moved to closures).
+- **SKILL.md** — `hermes a365 publish` core procedure updated to
+  document `--copilot-chat` + `--bot-id` flags (slice 19u-a),
+  the dual-emit mode (`--aiteammate --copilot-chat`), the
+  `botId` extraction fallback order (v0.4.0), and the Azure Bot
+  Service prerequisite for live Copilot Chat surfacing.
+- **references/live-tenant-test.md** — v0.2 → v0.4.0 label
+  refresh; §6 publish gained a Path B / `--copilot-chat`
+  cross-link; §9d.5 acceptance gates split streaming round-trip
+  (slices 19s + 19s-bis, #3 closed) from proactive pattern
+  (#4 still open), with an "incremental bubble growth" checkbox.
+
+### Changed
+
+- `.github/workflows/test.yml` and `publish.yml` bumped to
+  Node.js 24-compatible action versions per a GitHub deprecation
+  notice on the v0.4.0 publish run:
+  - `actions/checkout` v4 → v6
+  - `astral-sh/setup-uv` v5 → **v8.1.0** (pinned — upstream
+    stopped maintaining a moving v8 tag)
+  - `actions/setup-python` v5 → v6
+  - `pypa/gh-action-pypi-publish@release/v1` unchanged (Docker
+    action, unaffected by the Node runtime deprecation).
+
 ## [0.4.0] — 2026-05-12
 
 Feature release: Custom Engine Agent publish path for M365 Copilot
