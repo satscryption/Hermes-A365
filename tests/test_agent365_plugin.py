@@ -1286,13 +1286,16 @@ class TestBuildProactiveTargetSpec:
 
 class TestSend:
     @pytest.mark.asyncio
-    async def test_send_with_no_cached_inbound_returns_failure(
+    async def test_send_with_no_cached_inbound_and_no_registry_entry_fails(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Slice 19x-b: send() now falls through to _send_proactive when
+        # there's no cached inbound. With no registry entry either, the
+        # proactive path surfaces a clear "no registry entry" failure.
         a = _make_adapter(monkeypatch)
         result = await a.send(chat_id="missing", content="hi")
         assert result.success is False
-        assert "no cached inbound" in (result.error or "")
+        assert "no registry entry" in (result.error or "")
 
     @pytest.mark.asyncio
     async def test_send_with_cached_inbound_invokes_send_reply(
@@ -1341,6 +1344,250 @@ class TestSend:
         result = await a.send(chat_id="conv-1", content="x")
         assert result.success is False
         assert "token mint failed" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Slice 19x-b (#4): proactive send via target spec (sendToConversation)
+# ---------------------------------------------------------------------------
+
+
+class TestSendProactive:
+    """send() falls through to _send_proactive when no cached inbound."""
+
+    def _seed_registry_path_a(
+        self, adapter, *, conv_id: str = "conv-proactive"
+    ) -> None:
+        from hermes_a365.plugin.conversations import ConversationRef
+
+        adapter._conversations.upsert(
+            ConversationRef.from_activity(
+                {
+                    "type": "message",
+                    "id": "act-most-recent",
+                    "channelId": "msteams",
+                    "serviceUrl": "https://smba.trafficmanager.net/amer/x/",
+                    "conversation": {
+                        "id": conv_id,
+                        "conversationType": "personal",
+                        "tenantId": "11111111-2222-3333-4444-555555555555",
+                    },
+                    "from": {"id": "user-1", "name": "Sadiq"},
+                    "recipient": {
+                        "id": "agent-1",
+                        "name": "Inbox Helper",
+                        "tenantId": "11111111-2222-3333-4444-555555555555",
+                        "agenticAppId": "aa-app-id",
+                        "agenticUserId": "aa-user-id",
+                    },
+                    "text": "earlier message",
+                }
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_path_a_happy_posts_to_send_to_conversation_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_adapter(monkeypatch)
+        self._seed_registry_path_a(a)
+        a._bridge_cfg = MagicMock()
+        a._fmi_cache = MagicMock()
+        a._user_cache = MagicMock()
+
+        bridge = adapter_mod._import_bridge()
+        monkeypatch.setattr(
+            bridge,
+            "acquire_outbound_token",
+            AsyncMock(return_value="t1-bearer"),
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 201
+        mock_resp.json = MagicMock(return_value={"id": "new-activity-id"})
+        a._http_client = MagicMock()
+        a._http_client.post = AsyncMock(return_value=mock_resp)
+
+        # Strip the cached inbound so send() falls through to proactive.
+        ref = a._conversations.get("conv-proactive")
+        ref.raw = {}  # registry has metadata but no usable raw -> proactive path
+        # Re-upsert with the same metadata + populated raw so the target-spec
+        # has the fields it needs.
+        self._seed_registry_path_a(a)
+        # Then null out the cached-inbound lookup by setting raw back to empty
+        # — wait: _cached_inbound_for returns None when raw is falsy, but
+        # _build_proactive_target_spec also requires raw. Both need a hit.
+        # So we keep raw populated; to force the proactive path, monkeypatch
+        # _cached_inbound_for to return None.
+        monkeypatch.setattr(a, "_cached_inbound_for", lambda _chat_id: None)
+
+        result = await a.send(chat_id="conv-proactive", content="ping")
+
+        assert result.success is True
+        assert result.message_id == "new-activity-id"
+        # POST went to sendToConversation URL (no /<activity_id> suffix).
+        called_args = a._http_client.post.await_args
+        url = called_args.args[0]
+        assert url == (
+            "https://smba.trafficmanager.net/amer/x/v3/conversations/conv-proactive/activities"
+        )
+        # Bearer token from acquire_outbound_token used verbatim.
+        assert called_args.kwargs["headers"]["Authorization"] == "Bearer t1-bearer"
+        # Activity body has no replyToId (this is a proactive send, not a reply).
+        body = called_args.kwargs["json"]
+        assert "replyToId" not in body
+        assert body["type"] == "message"
+        assert body["text"] == "ping"
+        # Outbound from = inbound recipient (the agentic identity).
+        assert body["from"]["agenticAppId"] == "aa-app-id"
+        # Outbound recipient = inbound from (the user).
+        assert body["recipient"]["id"] == "user-1"
+
+    @pytest.mark.asyncio
+    async def test_path_unknown_returns_deferred_error_referencing_16(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hermes_a365.plugin.conversations import ConversationRef
+
+        a = _make_adapter(monkeypatch)
+        # Inbound without agenticAppId / agenticUserId — path:unknown.
+        a._conversations.upsert(
+            ConversationRef.from_activity(
+                {
+                    "type": "message",
+                    "id": "act-most-recent",
+                    "serviceUrl": "https://smba.trafficmanager.net/",
+                    "conversation": {"id": "conv-pb", "conversationType": "personal"},
+                    "from": {"id": "user-1"},
+                    "recipient": {"id": "bot-1"},
+                }
+            )
+        )
+        monkeypatch.setattr(a, "_cached_inbound_for", lambda _chat_id: None)
+
+        result = await a.send(chat_id="conv-pb", content="ping")
+        assert result.success is False
+        assert "Path B" in (result.error or "")
+        assert "#16" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_token_mint_failure_surfaces_in_send_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_adapter(monkeypatch)
+        self._seed_registry_path_a(a)
+        a._http_client = MagicMock()
+        a._http_client.post = AsyncMock()
+        a._bridge_cfg = MagicMock()
+        a._fmi_cache = MagicMock()
+        a._user_cache = MagicMock()
+
+        bridge = adapter_mod._import_bridge()
+        monkeypatch.setattr(
+            bridge,
+            "acquire_outbound_token",
+            AsyncMock(side_effect=RuntimeError("AADSTS70011")),
+        )
+        monkeypatch.setattr(a, "_cached_inbound_for", lambda _chat_id: None)
+
+        result = await a.send(chat_id="conv-proactive", content="ping")
+        assert result.success is False
+        assert "token" in (result.error or "")
+        assert "AADSTS70011" in (result.error or "")
+        # No POST attempted when token mint fails.
+        assert a._http_client.post.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_post_non_2xx_surfaces_status_in_send_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_adapter(monkeypatch)
+        self._seed_registry_path_a(a)
+        a._bridge_cfg = MagicMock()
+        a._fmi_cache = MagicMock()
+        a._user_cache = MagicMock()
+
+        bridge = adapter_mod._import_bridge()
+        monkeypatch.setattr(
+            bridge,
+            "acquire_outbound_token",
+            AsyncMock(return_value="t1-bearer"),
+        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        a._http_client = MagicMock()
+        a._http_client.post = AsyncMock(return_value=mock_resp)
+        monkeypatch.setattr(a, "_cached_inbound_for", lambda _chat_id: None)
+
+        result = await a.send(chat_id="conv-proactive", content="ping")
+        assert result.success is False
+        assert "403" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_post_exception_surfaces_in_send_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_adapter(monkeypatch)
+        self._seed_registry_path_a(a)
+        a._bridge_cfg = MagicMock()
+        a._fmi_cache = MagicMock()
+        a._user_cache = MagicMock()
+
+        bridge = adapter_mod._import_bridge()
+        monkeypatch.setattr(
+            bridge,
+            "acquire_outbound_token",
+            AsyncMock(return_value="t1-bearer"),
+        )
+        a._http_client = MagicMock()
+        a._http_client.post = AsyncMock(side_effect=ConnectionError("ECONNRESET"))
+        monkeypatch.setattr(a, "_cached_inbound_for", lambda _chat_id: None)
+
+        result = await a.send(chat_id="conv-proactive", content="ping")
+        assert result.success is False
+        assert "post" in (result.error or "")
+        assert "ECONNRESET" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_proactive_no_op_when_adapter_not_connected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_adapter(monkeypatch)
+        self._seed_registry_path_a(a)
+        # http_client / bridge_cfg left as None — adapter not connected.
+        monkeypatch.setattr(a, "_cached_inbound_for", lambda _chat_id: None)
+
+        result = await a.send(chat_id="conv-proactive", content="ping")
+        assert result.success is False
+        assert "not connected" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_empty_response_body_still_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # BF connector sometimes returns 200 with empty body — the
+        # server-side activity id may not be echoed back.
+        a = _make_adapter(monkeypatch)
+        self._seed_registry_path_a(a)
+        a._bridge_cfg = MagicMock()
+        a._fmi_cache = MagicMock()
+        a._user_cache = MagicMock()
+
+        bridge = adapter_mod._import_bridge()
+        monkeypatch.setattr(
+            bridge,
+            "acquire_outbound_token",
+            AsyncMock(return_value="t1-bearer"),
+        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json = MagicMock(side_effect=ValueError("no body"))
+        a._http_client = MagicMock()
+        a._http_client.post = AsyncMock(return_value=mock_resp)
+        monkeypatch.setattr(a, "_cached_inbound_for", lambda _chat_id: None)
+
+        result = await a.send(chat_id="conv-proactive", content="ping")
+        assert result.success is True
+        assert result.message_id == ""
 
 
 # ---------------------------------------------------------------------------

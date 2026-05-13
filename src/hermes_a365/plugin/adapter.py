@@ -680,9 +680,13 @@ class Agent365Adapter(BasePlatformAdapter):
         """Render `content` as a reply Activity and POST via serviceUrl.
 
         Looks up the most recent inbound activity for ``chat_id`` in the
-        durable registry (slice 19o). When the registry has no entry
-        for this chat — e.g. a proactive cron delivery against a
-        conversation we've never seen — returns a failure SendResult.
+        durable registry (slice 19o). When the registry has no cached
+        inbound activity (no ``raw`` for this chat) — e.g. a cron-driven
+        proactive delivery — slice 19x-b (#4) falls through to
+        ``_send_proactive`` which posts a non-reply Activity via the
+        ``sendToConversation`` BF endpoint instead of ``replyToActivity``.
+        Path A only — Path B (Custom Engine Agent via Azure Bot Service)
+        proactive is gated on #16 and returns a clear deferred-error.
 
         Slice 19s-bis: in personal chats with no active stream for the
         conversation, ``send()`` emits a BF streaming-start activity
@@ -703,9 +707,9 @@ class Agent365Adapter(BasePlatformAdapter):
         bridge = _import_bridge()
         inbound = self._cached_inbound_for(chat_id)
         if not inbound:
-            msg = f"no cached inbound for chat_id={chat_id!r} — cannot reply"
-            logger.error("agent365 send: %s", msg)
-            return SendResult(success=False, error=msg)
+            # Slice 19x-b (#4): no cached inbound this lifetime; try the
+            # proactive (sendToConversation) path against the registry.
+            return await self._send_proactive(chat_id, content)
 
         if self._http_client is None or self._bridge_cfg is None:
             msg = "agent365 send: adapter not connected"
@@ -766,6 +770,118 @@ class Agent365Adapter(BasePlatformAdapter):
             logger.error("agent365 send_reply failed: %s", e)
             return SendResult(success=False, error=str(e))
         return SendResult(success=True, message_id=str(inbound.get("id") or ""))
+
+    async def _send_proactive(
+        self, chat_id: str, content: str
+    ) -> SendResult:
+        """Slice 19x-b (#4): cron-driven outbound for a chat the gateway
+        hasn't seen an inbound for this lifetime.
+
+        Reads the target spec from ``_build_proactive_target_spec``;
+        falls cleanly on three conditions:
+
+        - No registry entry → ``no registry entry`` error.
+        - Target tagged ``path != "A"`` → Path B proactive not yet
+          implemented (#16 prerequisite); deferred-error rather than a
+          silent 401 from the wrong token chain.
+        - Adapter not connected (HTTP client / bridge cfg unset) →
+          ``adapter not connected`` error.
+
+        Happy path: mints the user-FIC chain against a synthetic
+        activity-shaped dict (``acquire_outbound_token`` only reads
+        ``recipient`` + ``conversation`` to extract the agentic ids), then
+        POSTs a non-reply Activity to
+        ``<serviceUrl>/v3/conversations/<conv_id>/activities`` (the
+        ``sendToConversation`` BF endpoint — no ``replyToId``, no
+        ``/activities/<id>`` suffix). Returns the new activity id from
+        the server response when available.
+        """
+        target = self._build_proactive_target_spec(chat_id)
+        if target is None:
+            msg = (
+                f"no registry entry for chat_id={chat_id!r} — "
+                "cannot reach a chat the bridge has never seen"
+            )
+            logger.error("agent365 proactive send: %s", msg)
+            return SendResult(success=False, error=msg)
+
+        if target["path"] != "A":
+            msg = (
+                "Path B proactive send not yet implemented — Custom "
+                "Engine Agent outbound (sendToConversation via Azure "
+                "Bot Service) is gated on #16 (Azure subscription + "
+                f"Bot Service registration). Target path={target['path']!r}."
+            )
+            logger.error("agent365 proactive send: %s", msg)
+            return SendResult(success=False, error=msg)
+
+        if self._http_client is None or self._bridge_cfg is None:
+            msg = "agent365 proactive send: adapter not connected"
+            logger.error(msg)
+            return SendResult(success=False, error=msg)
+
+        # Synthetic activity-shape for the token chain. ``acquire_outbound_token``
+        # reads recipient.agenticAppId / recipient.agenticUserId / tenantId.
+        token_input = {
+            "recipient": dict(target["from"]),  # outbound sender = agentic identity
+            "conversation": {
+                "id": target["conversation_id"],
+                "tenantId": target["tenant_id"],
+            },
+        }
+
+        bridge = _import_bridge()
+        try:
+            token = await bridge.acquire_outbound_token(
+                client=self._http_client,
+                cfg=self._bridge_cfg,
+                activity=token_input,
+                fmi_cache=self._fmi_cache,
+                user_cache=self._user_cache,
+            )
+        except Exception as e:
+            logger.error("agent365 proactive token mint failed: %s", e)
+            return SendResult(success=False, error=f"token: {e}")
+
+        activity = {
+            "type": "message",
+            "from": dict(target["from"]),
+            "recipient": dict(target["recipient"]),
+            "conversation": {"id": target["conversation_id"]},
+            "text": content,
+        }
+        service_url = target["service_url"].rstrip("/")
+        url = f"{service_url}/v3/conversations/{target['conversation_id']}/activities"
+
+        try:
+            resp = await self._http_client.post(
+                url,
+                json=activity,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=15.0,
+            )
+        except Exception as e:
+            logger.error("agent365 proactive POST failed: %s", e)
+            return SendResult(success=False, error=f"post: {e}")
+
+        # httpx raises on .raise_for_status; do the same shape but avoid
+        # hard-coupling to httpx specifics (the tests use MagicMock).
+        status = getattr(resp, "status_code", None)
+        if status is not None and not (200 <= int(status) < 300):
+            msg = f"proactive POST returned status={status}"
+            logger.error("agent365 proactive: %s", msg)
+            return SendResult(success=False, error=msg)
+
+        new_id = ""
+        try:
+            body = resp.json() if callable(getattr(resp, "json", None)) else None
+            if isinstance(body, dict):
+                new_id = str(body.get("id") or "")
+        except Exception:
+            # Server may return empty body — that's fine.
+            pass
+
+        return SendResult(success=True, message_id=new_id)
 
     async def _send_stream_start(
         self,
