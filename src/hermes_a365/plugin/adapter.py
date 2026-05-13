@@ -265,6 +265,18 @@ class Agent365Adapter(BasePlatformAdapter):
             self._conversations_path
         )
 
+        # Slice 19x-d (#4): conversations registry prune threshold.
+        # Default 30 days matches Hermes' SessionStore reset policy.
+        # Operators wire `await adapter.prune_conversations()` from cron
+        # to drop dead chats without restarting the gateway.
+        raw_prune = extra.get("conversations_prune_max_age_days")
+        try:
+            self._conversations_prune_max_age_days: float = (
+                float(raw_prune) if raw_prune is not None else 30.0
+            )
+        except (ValueError, TypeError):
+            self._conversations_prune_max_age_days = 30.0
+
         # Lazily-built runtime objects (populated in connect()).
         self._http_client: Any = None
         self._jwks_cache: Any = None
@@ -593,6 +605,37 @@ class Agent365Adapter(BasePlatformAdapter):
                 e,
             )
 
+    async def prune_conversations(self) -> int:
+        """Slice 19x-d (#4): drop stale ConversationRegistry entries.
+
+        Mirrors Hermes' ``SessionStore.prune_old_entries`` shape —
+        skips entries that are operator-pinned, in
+        ``BasePlatformAdapter._active_sessions``, or have no
+        ``last_used_at`` stamp. Threshold is
+        ``extra.conversations_prune_max_age_days`` (default 30).
+
+        Operators wire this from cron (no built-in periodic loop;
+        keeping it one-shot avoids adding a maintenance-task pattern
+        the gateway doesn't otherwise use). Saves to disk if anything
+        dropped.
+
+        Returns the number of entries removed.
+        """
+        active_keys = set(self._active_sessions.keys())
+        dropped = self._conversations.prune_old_entries(
+            max_age_days=self._conversations_prune_max_age_days,
+            active_session_keys=active_keys,
+        )
+        if dropped > 0:
+            self._persist_conversations()
+            logger.info(
+                "agent365 prune_conversations: dropped %d stale entry(ies); "
+                "%d remain.",
+                dropped,
+                len(self._conversations),
+            )
+        return dropped
+
     def _cached_inbound_for(self, chat_id: str) -> dict[str, Any] | None:
         """Return the most recent inbound activity for ``chat_id``,
         sourced from the registry's ``raw`` field. Slice 19o's
@@ -711,6 +754,11 @@ class Agent365Adapter(BasePlatformAdapter):
             # proactive (sendToConversation) path against the registry.
             return await self._send_proactive(chat_id, content)
 
+        # Slice 19x-d (#4): bump the registry's last_used_at so prune
+        # honours actively-driven chats even when no fresh inbound has
+        # arrived recently (e.g. operator-driven outbound only).
+        self._conversations.mark_used(chat_id)
+
         if self._http_client is None or self._bridge_cfg is None:
             msg = "agent365 send: adapter not connected"
             logger.error(msg)
@@ -804,6 +852,11 @@ class Agent365Adapter(BasePlatformAdapter):
             )
             logger.error("agent365 proactive send: %s", msg)
             return SendResult(success=False, error=msg)
+
+        # Slice 19x-d (#4): bump last_used_at — proactive sends are
+        # exactly the case where outbound traffic should keep the
+        # registry entry warm.
+        self._conversations.mark_used(chat_id)
 
         if target["path"] != "A":
             msg = (
@@ -1023,6 +1076,8 @@ class Agent365Adapter(BasePlatformAdapter):
             # No-op: the gateway pulses typing periodically; without
             # a cached inbound we have nowhere to post.
             return None
+        # Slice 19x-d (#4): bump last_used_at on typing too.
+        self._conversations.mark_used(chat_id)
         typing_activity = {
             "type": "typing",
             "from": inbound.get("recipient") or {},
@@ -1052,6 +1107,8 @@ class Agent365Adapter(BasePlatformAdapter):
             msg = f"agent365 send_image: no cached inbound for {chat_id!r}"
             logger.error(msg)
             return SendResult(success=False, error=msg)
+        # Slice 19x-d (#4): bump last_used_at on image outbound.
+        self._conversations.mark_used(chat_id)
         if self._http_client is None or self._bridge_cfg is None:
             msg = "agent365 send_image: adapter not connected"
             logger.error(msg)
@@ -1125,6 +1182,10 @@ class Agent365Adapter(BasePlatformAdapter):
                 success=False,
                 error=f"agent365 edit_message: no cached inbound for chat_id={chat_id!r}",
             )
+
+        # Slice 19x-d (#4): streaming edits are clear outbound traffic;
+        # mark the conversation as recently used so prune respects it.
+        self._conversations.mark_used(chat_id)
 
         # DM-only: BF streaming-ux doc:
         # "Streaming bot message is available only for one-on-one chats."

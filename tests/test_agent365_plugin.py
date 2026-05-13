@@ -99,11 +99,18 @@ class _StubBasePlatformAdapter:
     """
 
     def __init__(self, config: Any, platform: Any) -> None:
+        import asyncio as _asyncio
+
         self.config = config
         self.platform = platform
         self._running = False
         self._fatal: tuple[str, str, bool] | None = None
         self._handled_events: list[Any] = []
+        # Slice 19x-d (#4): mirror real BasePlatformAdapter's in-flight
+        # state primitives so prune_conversations() can read
+        # self._active_sessions without crashing the test fakes.
+        self._active_sessions: dict[str, _asyncio.Event] = {}
+        self._session_tasks: dict[str, _asyncio.Task] = {}
 
     def _mark_connected(self) -> None:
         self._running = True
@@ -3133,3 +3140,288 @@ class TestRegisterCliDispatch:
         rc = cli_mod.a365_command(ns)
         assert rc == 2
         assert "instance" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Slice 19x-d (#4): adapter lifecycle wiring — prune_conversations + mark_used
+# ---------------------------------------------------------------------------
+
+
+class TestConversationsPruneConfig:
+    def test_default_max_age_is_30_days(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_adapter(monkeypatch)
+        assert a._conversations_prune_max_age_days == 30.0
+
+    def test_extra_override_int(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        a = _make_adapter(monkeypatch, conversations_prune_max_age_days=7)
+        assert a._conversations_prune_max_age_days == 7.0
+
+    def test_extra_override_float(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        a = _make_adapter(monkeypatch, conversations_prune_max_age_days=0.5)
+        assert a._conversations_prune_max_age_days == 0.5
+
+    def test_extra_override_string_int(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # YAML may surface this as a string depending on quoting.
+        a = _make_adapter(monkeypatch, conversations_prune_max_age_days="14")
+        assert a._conversations_prune_max_age_days == 14.0
+
+    def test_invalid_value_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_adapter(
+            monkeypatch, conversations_prune_max_age_days="not-a-number"
+        )
+        assert a._conversations_prune_max_age_days == 30.0
+
+
+class TestPruneConversations:
+    @pytest.mark.asyncio
+    async def test_invokes_registry_prune_with_active_session_keys(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+
+        from hermes_a365.plugin.conversations import ConversationRef
+
+        a = _make_adapter(monkeypatch, conversations_prune_max_age_days=10)
+        # Seed both an active and an inactive entry, then mark one as
+        # "active" via _active_sessions.
+        a._conversations.upsert(
+            ConversationRef(
+                conversation_id="active-chat",
+                service_url="https://x/",
+                last_used_at=1000.0,  # ancient
+            )
+        )
+        a._conversations.upsert(
+            ConversationRef(
+                conversation_id="stale-chat",
+                service_url="https://x/",
+                last_used_at=1000.0,  # ancient
+            )
+        )
+        # Override last_used_at after upsert (which auto-stamps to now).
+        a._conversations._by_id["active-chat"].last_used_at = 1000.0
+        a._conversations._by_id["stale-chat"].last_used_at = 1000.0
+        a._active_sessions["active-chat"] = asyncio.Event()
+
+        # Patch registry.prune_old_entries to observe the args without
+        # double-invoking the real prune. (Wrap rather than replace so
+        # the actual logic still runs and we can assert outputs.)
+        original = a._conversations.prune_old_entries
+        captured: dict[str, Any] = {}
+
+        def _spy(
+            max_age_days: float, *, active_session_keys=None, now=None
+        ) -> int:
+            captured["max_age_days"] = max_age_days
+            captured["active_session_keys"] = set(active_session_keys or [])
+            captured["now"] = now
+            return original(
+                max_age_days,
+                active_session_keys=active_session_keys,
+                now=now,
+            )
+
+        a._conversations.prune_old_entries = _spy  # type: ignore[assignment]
+
+        dropped = await a.prune_conversations()
+        assert dropped == 1
+        assert captured["max_age_days"] == 10.0
+        assert captured["active_session_keys"] == {"active-chat"}
+
+    @pytest.mark.asyncio
+    async def test_saves_to_disk_when_anything_dropped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from hermes_a365.plugin.conversations import (
+            ConversationRef,
+            ConversationRegistry,
+        )
+
+        conv_path = tmp_path / "convs.json"
+        a = _make_adapter(
+            monkeypatch,
+            conversations_path=str(conv_path),
+            conversations_prune_max_age_days=10,
+        )
+        a._conversations.upsert(
+            ConversationRef(
+                conversation_id="stale", service_url="https://x/"
+            )
+        )
+        a._conversations._by_id["stale"].last_used_at = 1000.0  # ancient
+        # Persist initial state so we can confirm the post-prune save.
+        a._persist_conversations()
+
+        dropped = await a.prune_conversations()
+        assert dropped == 1
+        # Round-trip from disk: the dropped entry isn't there.
+        reloaded = ConversationRegistry.load(conv_path)
+        assert "stale" not in reloaded
+
+    @pytest.mark.asyncio
+    async def test_does_not_save_when_nothing_dropped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from hermes_a365.plugin.conversations import ConversationRef
+
+        conv_path = tmp_path / "convs.json"
+        a = _make_adapter(
+            monkeypatch,
+            conversations_path=str(conv_path),
+            conversations_prune_max_age_days=30,
+        )
+        a._conversations.upsert(
+            ConversationRef(conversation_id="fresh", service_url="https://x/")
+        )
+        # Don't seed an initial save -- if nothing drops, the prune
+        # path should not write anything either.
+
+        dropped = await a.prune_conversations()
+        assert dropped == 0
+        assert not conv_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_empty_active_session_keys_when_no_active_sessions(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Isolate from any leaked ~/.hermes/agents/test-agent/conversations.json
+        # left by earlier sessions.
+        a = _make_adapter(monkeypatch, conversations_path=str(tmp_path / "convs.json"))
+        # No entries, nothing to drop, but the method should still run.
+        assert await a.prune_conversations() == 0
+
+
+class TestMarkUsedFromOutboundPaths:
+    """Outbound paths bump last_used_at so prune respects send-active chats."""
+
+    @pytest.mark.asyncio
+    async def test_send_bumps_last_used_at_on_cached_inbound_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_adapter(monkeypatch)
+        a._conversations.upsert(
+            adapter_mod.ConversationRef.from_activity(_make_inbound()),
+            now=100.0,
+        )
+        a._http_client = MagicMock()
+        a._bridge_cfg = MagicMock()
+        a._fmi_cache = MagicMock()
+        a._user_cache = MagicMock()
+        bridge = adapter_mod._import_bridge()
+        monkeypatch.setattr(bridge, "send_reply", AsyncMock(return_value=None))
+
+        before = a._conversations.get("conv-1").last_used_at
+        await a.send(chat_id="conv-1", content="hi")
+        after = a._conversations.get("conv-1").last_used_at
+        assert after is not None
+        assert before == 100.0
+        assert after > before
+
+    @pytest.mark.asyncio
+    async def test_send_proactive_bumps_last_used_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hermes_a365.plugin.conversations import ConversationRef
+
+        a = _make_adapter(monkeypatch)
+        # Seed registry with Path A entry.
+        a._conversations.upsert(
+            ConversationRef.from_activity(
+                {
+                    "type": "message",
+                    "id": "act-prior",
+                    "channelId": "msteams",
+                    "serviceUrl": "https://x/",
+                    "conversation": {
+                        "id": "c1",
+                        "conversationType": "personal",
+                        "tenantId": "t",
+                    },
+                    "from": {"id": "u"},
+                    "recipient": {
+                        "id": "a",
+                        "agenticAppId": "aa",
+                        "agenticUserId": "au",
+                    },
+                }
+            ),
+            now=100.0,
+        )
+        a._bridge_cfg = MagicMock()
+        a._fmi_cache = MagicMock()
+        a._user_cache = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 201
+        mock_resp.json = MagicMock(return_value={"id": "out-id"})
+        a._http_client = MagicMock()
+        a._http_client.post = AsyncMock(return_value=mock_resp)
+        bridge = adapter_mod._import_bridge()
+        monkeypatch.setattr(
+            bridge, "acquire_outbound_token", AsyncMock(return_value="tok")
+        )
+        # Force proactive path.
+        monkeypatch.setattr(a, "_cached_inbound_for", lambda _c: None)
+
+        before = a._conversations.get("c1").last_used_at
+        await a.send(chat_id="c1", content="hello")
+        after = a._conversations.get("c1").last_used_at
+        assert after is not None
+        assert before == 100.0
+        assert after > before
+
+    @pytest.mark.asyncio
+    async def test_send_typing_bumps_last_used_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_adapter(monkeypatch)
+        a._conversations.upsert(
+            adapter_mod.ConversationRef.from_activity(_make_inbound()),
+            now=100.0,
+        )
+        # send_typing routes through _post_activity; stub it out so we
+        # don't need a real http client.
+        a._post_activity = AsyncMock(return_value=None)
+
+        before = a._conversations.get("conv-1").last_used_at
+        await a.send_typing(chat_id="conv-1")
+        after = a._conversations.get("conv-1").last_used_at
+        assert after > before
+
+    @pytest.mark.asyncio
+    async def test_send_image_bumps_last_used_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_adapter(monkeypatch)
+        a._conversations.upsert(
+            adapter_mod.ConversationRef.from_activity(_make_inbound()),
+            now=100.0,
+        )
+        a._http_client = MagicMock()
+        a._bridge_cfg = MagicMock()
+        a._fmi_cache = MagicMock()
+        a._user_cache = MagicMock()
+        bridge = adapter_mod._import_bridge()
+        monkeypatch.setattr(bridge, "send_reply", AsyncMock(return_value=None))
+
+        before = a._conversations.get("conv-1").last_used_at
+        await a.send_image(chat_id="conv-1", image_url="https://img/")
+        after = a._conversations.get("conv-1").last_used_at
+        assert after > before
+
+    @pytest.mark.asyncio
+    async def test_proactive_failure_no_registry_does_not_crash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # When the registry has no entry at all, mark_used is a no-op;
+        # the proactive failure path returns cleanly without touching
+        # anything that doesn't exist.
+        a = _make_adapter(monkeypatch)
+        result = await a.send(chat_id="never-seen", content="hi")
+        assert result.success is False
+        assert "no registry entry" in (result.error or "")
