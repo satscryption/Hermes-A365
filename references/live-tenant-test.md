@@ -6,12 +6,12 @@ on first run; expect ~30–45 minutes including the M365 Admin Centre
 approval step (longer if the tenant is on macOS 26 — see §3's
 device-code-volume failure mode).
 
-**Snapshot:** 2026-05-14 (rounds 1–8 incorporated + slice 19u-a
-walkthrough; §11 Path B drafted + Phase 2 walked end-of-day 2026-05-14
-— Microsoft-side validated, end-to-end blocked on
-[#34](https://github.com/satscryption/Hermes-A365/issues/34)). Tracks
-the current `main` branch; specific slices are referenced inline
-where they matter to operator behaviour.
+**Snapshot:** 2026-05-15 (rounds 1–8 incorporated + slice 19u-a
+walkthrough; §11 Path B drafted + Phase 2 walked 2026-05-14; #34
+inbound shipped 2026-05-15; #33 outbound wrapper shipped 2026-05-15
+but blocked on a separate-identity follow-up — see §11.10 finding
+14). Tracks the current `main` branch; specific slices are
+referenced inline where they matter to operator behaviour.
 
 > ## Scope: Path A (AI Teammate) only
 >
@@ -1079,7 +1079,7 @@ record — every row is now closed (the architectural one too).
 
 ## 11. Path B — Custom Engine Agent + Azure Bot Service (Copilot Chat surfacing)
 
-> ## ⚠️ Microsoft-side validated; end-to-end blocked on [#34](https://github.com/satscryption/Hermes-A365/issues/34)
+> ## ⚠️ Inbound shipped; outbound blocked on operator identity registration
 >
 > §11 was drafted 2026-05-14 from Microsoft's published docs and
 > walked the same day against the satscryption Azure GA account
@@ -1088,14 +1088,23 @@ record — every row is now closed (the architectural one too).
 > the **acceptedTerms PATCH** in §11.4 as a load-bearing finding),
 > Custom Engine Agent surfaces in M365 Copilot Chat and Cowork.
 >
-> The end-to-end Copilot Chat round-trip is blocked on a
-> **plugin-side gap**:
-> [#34](https://github.com/satscryption/Hermes-A365/issues/34) —
-> our inbound JWT validator is A365-only and rejects classic BF
-> S2S tokens with HTTP 403. Once #34 lands, re-walk §§11.6–11.8 to
-> close [#16](https://github.com/satscryption/Hermes-A365/issues/16).
-> See §11.10 for the full findings table + the Direct Line probe
-> recipe for verifying the fix once it lands.
+> - **[#34](https://github.com/satscryption/Hermes-A365/issues/34)
+>   closed 2026-05-15** — Path B inbound JWT validator branch
+>   shipped + live-verified. The agent loop now runs end-to-end on
+>   Path B traffic.
+> - **[#33](https://github.com/satscryption/Hermes-A365/issues/33)
+>   wrapper code shipped 2026-05-15** — BF S2S `client_credentials`
+>   mint + Path A/B dispatcher + path-tag refinement. But the
+>   blueprint Entra app is classified Agentic by Microsoft's policy,
+>   so the live token mint fails with `AADSTS82001`. Path B outbound
+>   is gated on the **#33 follow-up**: register a separate
+>   non-agentic Entra app for Path B and rewire the Bot Service
+>   `--appid` to it.
+>
+> Until the follow-up lands, Path B end-to-end shows: inbound
+> arrives, agent loop runs, outbound mint fails with the explicit
+> AADSTS82001 error pointing at the follow-up issue. See §11.10 for
+> the full findings table + the Direct Line probe recipe.
 >
 > Path A (§§0–10) remains the validated end-to-end path.
 
@@ -1469,14 +1478,33 @@ pass: add a structured logger to the FastAPI route in
 `src/hermes_a365/plugin/adapter.py:419` so operators can correlate
 gateway-side rejections with upstream Microsoft errors.
 
+⚠️ **Phase 2 finding (2026-05-15, #33) — Path B outbound is blocked
+on Entra identity shape.** [#34](https://github.com/satscryption/Hermes-A365/issues/34)
+closed the inbound JWT branch; agent loop now runs end-to-end on Path
+B inbound. The outbound side then mints a classic BF S2S
+`client_credentials` bearer per [#33](https://github.com/satscryption/Hermes-A365/issues/33)
+— but Microsoft returns `AADSTS82001: Agentic application is not
+permitted to request app-only tokens for resource Bot.Connector`. The
+blueprint Entra app inherits Microsoft's "Agentic" policy class (the
+same policy that bit slice 19e for general BF resources) and **cannot
+mint app-only tokens for any BF-family resource**, regardless of
+scope. Wrapper code is shape-complete (token mint logic, dispatcher,
+caching, tests); the gateway surfaces the failure cleanly with the
+operator-actionable error message. Path B end-to-end is blocked on
+**registering a separate non-agentic Entra app for Path B outbound** —
+filed as the #33 follow-up. Until that lands, Path B inbound replies
+hang silently on the Copilot Chat side and the gateway log shows the
+AADSTS82001 message.
+
 Acceptance gates — Microsoft side:
 
 - [ ] Bot resource's **Test in Web Chat** affordance (Azure Portal
       → your Bot resource → Test in Web Chat) round-trips a message
       end-to-end. This is an independent verification path that
       bypasses Copilot Chat and exercises just Bot Service →
-      `/api/messages` → reply. **Currently fails on the JWT branch
-      gap (#34).**
+      `/api/messages` → reply. **#34 closed inbound; outbound
+      currently fails with AADSTS82001 — gated on the #33 follow-up
+      (separate Entra identity).**
 
 Common failure shapes (encoded from the 2026-05-14 walk):
 
@@ -1566,6 +1594,7 @@ Copilot Chat surfacing, sibling to this validation work).
 | 11 | §11.8 | **HEADLINE.** `agent365` plugin's `validate_inbound_jwt` in `src/hermes_a365/activity_bridge.py:1063` is A365-only by design (slice 19f): it expects `iss = https://login.microsoftonline.com/<tenant>/v2.0` and `azp ∈ {APX_PRODUCTION_APP_ID}`. Classic Bot Framework S2S tokens (which Path B inbound carries) have `iss = https://api.botframework.com` and a different `azp`, so every Path B request fails JWT validation with HTTP 403 and the agent loop never runs. Confirmed by Direct Line probe returning `BotError / Failed to send activity / 403` via Microsoft's BF service. **Path B end-to-end blocked on this code branch landing.** | Filed as [#34](https://github.com/satscryption/Hermes-A365/issues/34) — sibling to [#33](https://github.com/satscryption/Hermes-A365/issues/33) (Path B outbound S2S). Needs a Path-A-vs-B detection branch on the route handler (likely keyed on token `iss` or activity `serviceUrl`) and a BF-shaped validator path that uses BF's JWKS + a BF-azp allowlist. |
 | 12 | §11.8 | `agent365` plugin emits **zero request-level logging** for `/api/messages`. Even `hermes gateway run -vv` (DEBUG) doesn't surface inbound POSTs or their 401/403 rejections — only application-level bridge INFO/DEBUG. Operators debugging Path B routing get no observability without a tcpdump or middleware shim. Would have shortened the §11.8 walk from ~60 min to ~10 min if it existed. | §11.8 flagged. Worth a polish pass: add a structured logger to the FastAPI route in `src/hermes_a365/plugin/adapter.py:419` that logs `(method, path, source_ip, response_status, latency_ms)` at INFO and the rejection reason at WARNING. |
 | 13 | §11.9 | Not exercised on the 2026-05-14 walk — bot resource left running for #34 dev cycle (see §11.10 footer below for resume instructions). Phase 2 follow-up: walk the teardown once #34 lands and confirm `az bot delete` retention/soft-delete shape + Teams App Catalog removal propagation. | Open follow-up. Skip until #34 closes. |
+| 14 | §11.8 | **HEADLINE for Path B outbound (#33 walk, 2026-05-15).** After #34 closed the inbound JWT branch, the live Direct Line probe showed Microsoft posting a real BF S2S token-mint request… but Microsoft returned `AADSTS82001: Agentic application '2e5e2dea-…' is not permitted to request app-only tokens for resource '8d2d3342-cf29-4959-9577-0e0eafbd16bc' (Bot Framework V4)`. The blueprint Entra app inherits Microsoft's Agentic-application policy class (which also blocked the v0.1 design's app-only chain — slice 19e replaced it with the user-FIC chain for Path A) and **cannot mint app-only tokens for ANY BF-family resource**, regardless of scope. Path B outbound's BF S2S `client_credentials` flow architecturally needs a non-agentic identity, which the blueprint app can't satisfy. | #33 wrapper code shipped (`dddb96b` had #34 inbound; the follow-on commit ships the BF S2S mint + dispatcher + path-tag refinement + AADSTS82001-aware error). Live mint fails AADSTS82001 with an operator-actionable error message in the gateway log pointing at the #33-follow-up issue. **The follow-up tracks the separate-Entra-app registration walk** (operator: `az ad app create` + admin consent for `Bot.Connector` + `az bot update --appid <new>` + republish manifest with new `botId`). |
 
 **Reproducing the Direct Line probe** (for finding 11, when #34 dev
 wants to verify the failure mode pre-fix or the success mode post-fix):

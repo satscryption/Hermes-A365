@@ -280,10 +280,11 @@ class Agent365Adapter(BasePlatformAdapter):
         # Lazily-built runtime objects (populated in connect()).
         self._http_client: Any = None
         self._jwks_cache: Any = None  # AAD-v2 / A365 path (slice 19f)
-        self._bf_jwks_cache: Any = None  # Bot Framework path (#34)
+        self._bf_jwks_cache: Any = None  # Bot Framework inbound (#34)
         self._idempotency_cache: Any = None
-        self._fmi_cache: Any = None
-        self._user_cache: Any = None
+        self._fmi_cache: Any = None  # Path A T1/T2 cache (slice 19e)
+        self._user_cache: Any = None  # Path A per-user final token cache
+        self._bf_token_cache: Any = None  # Path B outbound bearer cache (#33)
         self._bridge_cfg: Any = None
         self._app: Any = None
         self._uvicorn_server: Any = None
@@ -581,6 +582,8 @@ class Agent365Adapter(BasePlatformAdapter):
             self._fmi_cache = bridge._FmiCache()
         if self._user_cache is None:
             self._user_cache = bridge._UserTokenCache()
+        if self._bf_token_cache is None:
+            self._bf_token_cache = bridge._BfTokenCache()
 
         if self._app is None:
             self._app = self.build_app()
@@ -726,16 +729,21 @@ class Agent365Adapter(BasePlatformAdapter):
                 "agentic_user_id": str,       # empty when not a Path A inbound
                 "from": dict,                 # outbound sender (= inbound recipient)
                 "recipient": dict,            # outbound recipient (= inbound sender)
-                "path": "A" | "unknown",      # convenience tag for callers
+                "path": "A" | "B" | "unknown",  # convenience tag for callers
             }
 
-        Path-tagging rule: an entry is **Path A** when the cached
-        inbound's ``recipient`` carries both ``agenticAppId`` and
-        ``agenticUserId`` (the Microsoft A365 agentic-user routing
-        signal). Anything else is tagged ``"unknown"`` because Path B
-        (Custom Engine Agent via Azure Bot Service) uses a different
-        token chain that slice 19x-b deliberately doesn't ship — the
-        send-side fallback surfaces a deferred-error rather than 401.
+        Path-tagging rule (refined #33):
+
+        - **Path A** when the cached inbound's ``recipient`` carries
+          both ``agenticAppId`` and ``agenticUserId`` (the Microsoft
+          A365 agentic-user routing signal).
+        - **Path B** when those fields are absent AND the cached
+          ``serviceUrl`` has a host suffix matching a classic Bot
+          Framework destination (``.botframework.com`` /
+          ``.trafficmanager.net``). Slice 20e (#33) shipped the BF
+          S2S outbound token mint so these inbounds can now reply via
+          ``acquire_reply_token``'s Path B branch.
+        - **unknown** otherwise — callers raise rather than guess.
 
         Pure: no network, no token minting, no state mutation. Safe
         to call from sync contexts.
@@ -756,7 +764,14 @@ class Agent365Adapter(BasePlatformAdapter):
             or str(conversation.get("tenantId") or "")
             or (ref.tenant_id or "")
         )
-        path_tag = "A" if (agentic_app_id and agentic_user_id) else "unknown"
+        bridge = _import_bridge()
+        path_tag = bridge._inbound_path_tag(
+            {
+                "recipient": recipient_inbound,
+                "conversation": conversation,
+                "serviceUrl": ref.service_url,
+            }
+        )
 
         return {
             "service_url": ref.service_url,
@@ -914,7 +929,7 @@ class Agent365Adapter(BasePlatformAdapter):
           ``adapter not connected`` error.
 
         Happy path: mints the user-FIC chain against a synthetic
-        activity-shaped dict (``acquire_outbound_token`` only reads
+        activity-shaped dict (``acquire_reply_token`` reads
         ``recipient`` + ``conversation`` to extract the agentic ids), then
         POSTs a non-reply Activity to
         ``<serviceUrl>/v3/conversations/<conv_id>/activities`` (the
@@ -936,14 +951,16 @@ class Agent365Adapter(BasePlatformAdapter):
         # registry entry warm.
         self._conversations.mark_used(chat_id)
 
-        if target["path"] != "A":
+        if target["path"] == "unknown":
             msg = (
-                "Path B proactive send not yet implemented — Custom "
-                "Engine Agent outbound (sendToConversation via Azure "
-                "Bot Service) is gated on #16 (Azure subscription + "
-                f"Bot Service registration). Target path={target['path']!r}."
+                "agent365 proactive send: cannot classify target as "
+                "Path A or Path B (no agentic identifiers + serviceUrl "
+                f"not on the BF host-suffix allowlist). serviceUrl="
+                f"{target['service_url']!r}. This usually means the "
+                "registry entry pre-dates #33 path-tag refinement; "
+                "re-walk an inbound through /api/messages to refresh."
             )
-            logger.error("agent365 proactive send: %s", msg)
+            logger.error(msg)
             return SendResult(success=False, error=msg)
 
         if self._http_client is None or self._bridge_cfg is None:
@@ -951,24 +968,28 @@ class Agent365Adapter(BasePlatformAdapter):
             logger.error(msg)
             return SendResult(success=False, error=msg)
 
-        # Synthetic activity-shape for the token chain. ``acquire_outbound_token``
-        # reads recipient.agenticAppId / recipient.agenticUserId / tenantId.
+        # Synthetic activity-shape for the dispatcher. For Path A the
+        # dispatcher reads recipient.agenticAppId/agenticUserId/tenantId;
+        # for Path B it reads serviceUrl host suffix. Include both so
+        # the dispatcher can route without re-walking the registry.
         token_input = {
             "recipient": dict(target["from"]),  # outbound sender = agentic identity
             "conversation": {
                 "id": target["conversation_id"],
                 "tenantId": target["tenant_id"],
             },
+            "serviceUrl": target["service_url"],
         }
 
         bridge = _import_bridge()
         try:
-            token = await bridge.acquire_outbound_token(
+            token, _path = await bridge.acquire_reply_token(
                 client=self._http_client,
                 cfg=self._bridge_cfg,
                 activity=token_input,
                 fmi_cache=self._fmi_cache,
                 user_cache=self._user_cache,
+                bf_cache=self._bf_token_cache,
             )
         except Exception as e:
             logger.error("agent365 proactive token mint failed: %s", e)
@@ -1056,12 +1077,13 @@ class Agent365Adapter(BasePlatformAdapter):
         }
         url = f"{service_url}/v3/conversations/{conv_id}/activities"
         try:
-            token = await bridge.acquire_outbound_token(
+            token, _path = await bridge.acquire_reply_token(
                 client=self._http_client,
                 cfg=self._bridge_cfg,
                 activity=inbound,
                 fmi_cache=self._fmi_cache,
                 user_cache=self._user_cache,
+                bf_cache=self._bf_token_cache,
             )
             resp = await self._http_client.post(
                 url,
@@ -1126,12 +1148,13 @@ class Agent365Adapter(BasePlatformAdapter):
                 "agent365 _post_activity: serviceUrl / conversation.id missing"
             )
         url = f"{service_url}/v3/conversations/{conv_id}/activities"
-        token = await bridge.acquire_outbound_token(
+        token, _path = await bridge.acquire_reply_token(
             client=self._http_client,
             cfg=self._bridge_cfg,
             activity=inbound,
             fmi_cache=self._fmi_cache,
             user_cache=self._user_cache,
+            bf_cache=self._bf_token_cache,
         )
         resp = await self._http_client.post(
             url,
@@ -1345,12 +1368,13 @@ class Agent365Adapter(BasePlatformAdapter):
         url = f"{service_url}/v3/conversations/{conv_id}/activities"
 
         try:
-            token = await bridge.acquire_outbound_token(
+            token, _path = await bridge.acquire_reply_token(
                 client=self._http_client,
                 cfg=self._bridge_cfg,
                 activity=inbound,
                 fmi_cache=self._fmi_cache,
                 user_cache=self._user_cache,
+                bf_cache=self._bf_token_cache,
             )
             resp = await self._http_client.post(
                 url,
@@ -1491,12 +1515,13 @@ class Agent365Adapter(BasePlatformAdapter):
         url = f"{service_url}/v3/conversations/{conv_id}/activities"
         try:
             bridge = _import_bridge()
-            token = await bridge.acquire_outbound_token(
+            token, _path = await bridge.acquire_reply_token(
                 client=self._http_client,
                 cfg=self._bridge_cfg,
                 activity=inbound,
                 fmi_cache=self._fmi_cache,
                 user_cache=self._user_cache,
+                bf_cache=self._bf_token_cache,
             )
             resp = await self._http_client.post(
                 url,

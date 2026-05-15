@@ -777,6 +777,16 @@ TENANT_TOKEN_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant_id}/oauth
 FMI_TOKEN_SCOPE = "api://AzureADTokenExchange/.default"
 APX_PRODUCTION_APP_ID = "5a807f24-c9de-44ee-a3a7-329e88a00ffc"  # Messaging Bot API SP
 APX_PRODUCTION_SCOPE = f"{APX_PRODUCTION_APP_ID}/.default"
+
+# Path B outbound auth — classic Bot Framework S2S (#33, slice 20e).
+# Standard `client_credentials` grant against the bot's own tenant token
+# endpoint (SingleTenant bot resources use the per-tenant URL per
+# https://learn.microsoft.com/en-us/azure/bot-service/rest-api/bot-framework-rest-connector-authentication
+# "Authenticate requests from your bot to the Bot Connector service" §single-tenant).
+# Scope is the Bot Connector resource's `.default` — same audience the
+# inbound Connector→Bot tokens claim, so we're talking back to the same
+# service that called us.
+BF_S2S_SCOPE = "https://api.botframework.com/.default"
 # Default allowlist for inbound `azp` (slice 19f). Treat the same SP we
 # get outbound tokens *for* as the only sender we accept inbound *from*.
 # Other A365 services may join this list as we observe them.
@@ -1353,6 +1363,22 @@ class _UserTokenCache:
     """``{(agentic_user_id, scope): (access_token, expires_at)}``"""
 
 
+@dataclass
+class _BfTokenCache:
+    """Cache for the Path B (classic Bot Framework S2S) outbound token (#33).
+
+    Path B uses a simpler ``client_credentials`` flow than Path A's
+    user-FIC chain — bot identity is shared across every conversation,
+    so the cache key is just ``(tenant_id, scope)`` with no per-user
+    dimension. Microsoft's BF Connector accepts the same bearer for
+    every conversation the bot is registered for, so this cache is
+    typically a single entry per process.
+    """
+
+    by_key: dict[tuple[str, str], tuple[str, float]] = field(default_factory=dict)
+    """``{(tenant_id, scope): (access_token, expires_at)}``"""
+
+
 def _agentic_ids_from_activity(activity: dict[str, Any]) -> tuple[str, str, str]:
     """Pull (tenant_id, agent_app_instance_id, agentic_user_id) from inbound.
 
@@ -1535,6 +1561,205 @@ async def acquire_outbound_token(
 
 
 # ---------------------------------------------------------------------------
+# Path B outbound — classic Bot Framework S2S `client_credentials` (#33)
+# ---------------------------------------------------------------------------
+
+
+async def acquire_bf_s2s_token(
+    *,
+    client: Any,
+    tenant_id: str,
+    blueprint_client_id: str,
+    blueprint_client_secret: str,
+    bf_cache: _BfTokenCache,
+    scope: str = BF_S2S_SCOPE,
+    now: float | None = None,
+) -> str:
+    """Mint a classic Bot Framework S2S bearer for Path B outbound.
+
+    Standard ``client_credentials`` against the bot's tenant token
+    endpoint (SingleTenant bot resources). Cached per
+    ``(tenant_id, scope)``; refresh inside
+    ``TOKEN_REFRESH_SKEW_SECONDS`` of expiry. No per-user dimension —
+    Path B uses the bot's own identity for every conversation, so one
+    cached entry serves the whole gateway process.
+
+    ⚠️ **AADSTS82001 caveat (#33 walk, 2026-05-15).** If the Entra
+    app you pass as ``blueprint_client_id`` is classified as an
+    Agentic application by Microsoft's policy class (every blueprint
+    app registered via Path A's ``setup blueprint`` flow falls into
+    this category), Microsoft refuses to issue app-only tokens for
+    any BF-family resource — `AADSTS82001: Agentic application is
+    not permitted to request app-only tokens`. The token mint fails
+    with HTTP 400. **Workaround**: register a SEPARATE non-agentic
+    Entra app, grant it admin consent for ``Bot.Connector``, and pass
+    that app's client id + secret here instead. The wrapper's
+    follow-up issue tracks the operator-side identity registration
+    walk; until that lands, Path B outbound is wrapper-code-complete
+    but runtime-blocked on the identity shape.
+
+    Phase 2 walk 2026-05-15 (#33) confirmed the BF S2S mint argv is
+    correct end-to-end against Microsoft's token endpoint — it just
+    fails the Entra-side policy check on agentic apps.
+    """
+    import time as _time
+
+    cur = now if now is not None else _time.time()
+    cache_key = (tenant_id, scope)
+    cached = bf_cache.by_key.get(cache_key)
+    if cached and (cur + TOKEN_REFRESH_SKEW_SECONDS) < cached[1]:
+        return cached[0]
+
+    # Use the lower-level post + parse explicitly so we can detect
+    # AADSTS82001 and re-raise with a clear pointer for operators.
+    if _httpx is None:
+        raise BridgeConfigError(
+            "httpx not installed; run `uv sync --extra bridge`"
+        )
+    resp = await client.post(
+        TENANT_TOKEN_URL_TEMPLATE.format(tenant_id=tenant_id),
+        data={
+            "client_id": blueprint_client_id,
+            "scope": scope,
+            "grant_type": "client_credentials",
+            "client_secret": blueprint_client_secret,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=15.0,
+    )
+    if resp.status_code >= 400:
+        # Try to surface AADSTS82001 specifically — it has a fix that
+        # 'just a 400' doesn't.
+        try:
+            body = resp.json()
+            aadsts = body.get("error_codes") or []
+            desc = body.get("error_description") or ""
+        except Exception:
+            body = None
+            aadsts = []
+            desc = ""
+        if 82001 in aadsts:
+            raise TokenAcquisitionError(
+                "AADSTS82001",
+                f"BF S2S mint failed: blueprint app {blueprint_client_id!r} "
+                "is classified as an Agentic application by Microsoft's "
+                "policy and cannot mint app-only tokens for BF resources. "
+                "Path B outbound needs a SEPARATE non-agentic Entra app — "
+                "see the follow-up to #33. "
+                f"Microsoft response: {desc!r}",
+            )
+        resp.raise_for_status()
+    payload = resp.json()
+    token = payload["access_token"]
+    ttl = float(payload.get("expires_in", 3600))
+    bf_cache.by_key[cache_key] = (token, cur + ttl)
+    return token
+
+
+def _inbound_path_tag(
+    activity: dict[str, Any],
+    *,
+    trusted_bf_suffixes: tuple[str, ...] = (
+        ".botframework.com",
+        ".trafficmanager.net",
+    ),
+) -> str:
+    """Classify an inbound activity as ``"A"``, ``"B"``, or ``"unknown"``.
+
+    Path A: recipient carries both ``agenticAppId`` and ``agenticUserId``
+    (Microsoft A365 agentic-user routing signal) + a tenantId is
+    derivable. Anything that ``_agentic_ids_from_activity`` would accept.
+
+    Path B: agentic ids absent AND ``serviceUrl`` host suffix matches a
+    classic Bot Framework destination (``.botframework.com`` or
+    ``.trafficmanager.net`` — the Direct Line, Test in Web Chat, and
+    Teams channel serviceUrl shapes Microsoft uses today).
+
+    ``"unknown"``: the safe fallback. Callers raise rather than guess.
+    """
+    recipient = activity.get("recipient") or {}
+    conversation = activity.get("conversation") or {}
+    has_agentic = bool(
+        (recipient.get("tenantId") or conversation.get("tenantId"))
+        and recipient.get("agenticAppId")
+        and recipient.get("agenticUserId")
+    )
+    if has_agentic:
+        return "A"
+    service_url = activity.get("serviceUrl") or ""
+    if isinstance(service_url, str) and service_url:
+        parsed = urlparse(service_url)
+        host = (parsed.hostname or "").lower()
+        for suffix in trusted_bf_suffixes:
+            if host.endswith(suffix.lower()):
+                return "B"
+    return "unknown"
+
+
+async def acquire_reply_token(
+    *,
+    client: Any,
+    cfg: BridgeConfig,
+    activity: dict[str, Any],
+    fmi_cache: _FmiCache,
+    user_cache: _UserTokenCache,
+    bf_cache: _BfTokenCache,
+    scope_a: str = APX_PRODUCTION_SCOPE,
+    scope_b: str = BF_S2S_SCOPE,
+    now: float | None = None,
+) -> tuple[str, str]:
+    """Dispatch outbound token mint by inbound path.
+
+    Returns ``(bearer_token, path_tag)`` where ``path_tag`` is ``"A"``
+    or ``"B"``. ``"unknown"`` raises — callers must not POST a reply
+    with the wrong audience or BF will silently drop it.
+
+    Path A → ``acquire_outbound_token`` (three-stage user-FIC chain
+    against the Messaging Bot API SP).
+    Path B → ``acquire_bf_s2s_token`` (``client_credentials`` against
+    the Bot Connector resource).
+
+    This is the single dispatch site for outbound token minting. All
+    five caller surfaces — ``send_reply`` (serve mode),
+    ``Agent365Adapter.send`` cached-inbound branch,
+    ``_send_proactive``, ``_send_stream_start`` /
+    ``_post_activity`` / ``edit_message`` — funnel through here so
+    Path A vs Path B is decided in exactly one place.
+    """
+    path_tag = _inbound_path_tag(activity)
+    if path_tag == "A":
+        token = await acquire_outbound_token(
+            client=client,
+            cfg=cfg,
+            activity=activity,
+            fmi_cache=fmi_cache,
+            user_cache=user_cache,
+            scope=scope_a,
+            now=now,
+        )
+        return token, "A"
+    if path_tag == "B":
+        token = await acquire_bf_s2s_token(
+            client=client,
+            tenant_id=cfg.tenant_id,
+            blueprint_client_id=cfg.blueprint_client_id,
+            blueprint_client_secret=cfg.blueprint_client_secret,
+            bf_cache=bf_cache,
+            scope=scope_b,
+            now=now,
+        )
+        return token, "B"
+    raise RuntimeError(
+        "cannot classify inbound activity as Path A or Path B: "
+        f"recipient={activity.get('recipient')!r} "
+        f"serviceUrl={activity.get('serviceUrl')!r}. "
+        "Path A requires recipient.agenticAppId + recipient.agenticUserId; "
+        "Path B requires a classic-BF serviceUrl host suffix "
+        "(.botframework.com or .trafficmanager.net)."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Webhook forwarding
 # ---------------------------------------------------------------------------
 
@@ -1648,12 +1873,18 @@ async def send_reply(
     client: Any,
     fmi_cache: _FmiCache,
     user_cache: _UserTokenCache,
+    bf_cache: _BfTokenCache | None = None,
 ) -> Any:
     """POST a reply Activity to the inbound's serviceUrl.
 
-    Auth: agentic user-FIC token (per-inbound-user) — see
-    ``acquire_outbound_token``. The reply path itself is the standard
-    Bot Framework REST shape; only the bearer changes vs classic BF.
+    Auth: dispatched via ``acquire_reply_token`` — Path A (agentic
+    user-FIC chain) or Path B (BF S2S ``client_credentials``)
+    depending on the inbound shape. The reply path itself is the
+    standard Bot Framework REST shape; only the bearer changes.
+
+    ``bf_cache`` is optional for backwards-compatibility with existing
+    serve-mode callers that don't yet pass it; a fresh cache is
+    constructed when None (#33).
     """
     service_url = inbound.get("serviceUrl", "").rstrip("/")
     conv_id = inbound.get("conversation", {}).get("id", "")
@@ -1664,12 +1895,15 @@ async def send_reply(
             f"conversationId={conv_id!r}, activityId={activity_id!r}"
         )
     url = f"{service_url}/v3/conversations/{conv_id}/activities/{activity_id}"
-    token = await acquire_outbound_token(
+    if bf_cache is None:
+        bf_cache = _BfTokenCache()
+    token, _path = await acquire_reply_token(
         client=client,
         cfg=cfg,
         activity=inbound,
         fmi_cache=fmi_cache,
         user_cache=user_cache,
+        bf_cache=bf_cache,
     )
     return await client.post(
         url,
@@ -1691,6 +1925,7 @@ def make_app(
     jwks_cache: _JwksCache | None = None,
     fmi_cache: _FmiCache | None = None,
     user_cache: _UserTokenCache | None = None,
+    bf_cache: _BfTokenCache | None = None,
     idempotency_cache: _IdempotencyCache | None = None,
 ) -> Any:
     """Build the FastAPI app for the serve loop.
@@ -1711,6 +1946,8 @@ def make_app(
         fmi_cache = _FmiCache()
     if user_cache is None:
         user_cache = _UserTokenCache()
+    if bf_cache is None:
+        bf_cache = _BfTokenCache()
     if idempotency_cache is None:
         idempotency_cache = _IdempotencyCache(ttl_seconds=cfg.idempotency_ttl_seconds)
 
@@ -1800,6 +2037,7 @@ def make_app(
                 client=http_client,
                 fmi_cache=fmi_cache,
                 user_cache=user_cache,
+                bf_cache=bf_cache,
             )
             return _JSONResponse({"status": "webhook_error"}, status_code=200)
 
@@ -1823,6 +2061,7 @@ def make_app(
             client=http_client,
             fmi_cache=fmi_cache,
             user_cache=user_cache,
+            bf_cache=bf_cache,
         )
         return _JSONResponse({"status": "replied"})
 

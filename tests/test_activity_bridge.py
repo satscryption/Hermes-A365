@@ -30,6 +30,7 @@ from hermes_a365.activity_bridge import (
     APX_PRODUCTION_SCOPE,
     BF_ISSUER,
     BF_OPENID_CONFIG_URL,
+    BF_S2S_SCOPE,
     DEFAULT_TRUSTED_SERVICE_URL_HOST_SUFFIXES,
     FMI_TOKEN_SCOPE,
     GRAPH_RESOURCE,
@@ -42,12 +43,16 @@ from hermes_a365.activity_bridge import (
     VerifyReport,
     _activity_delivery_id,
     _agentic_ids_from_activity,
+    _BfTokenCache,
     _FmiCache,
     _IdempotencyCache,
+    _inbound_path_tag,
     _is_trusted_service_url,
     _JwksCache,
     _UserTokenCache,
+    acquire_bf_s2s_token,
     acquire_outbound_token,
+    acquire_reply_token,
     acquire_t1_token,
     acquire_t2_token,
     acquire_token,
@@ -1213,6 +1218,330 @@ class TestAcquireOutboundToken:
             )
         assert (t1, t2, final) == ("T1", "T2", "FINAL")
         assert len(capture) == 3
+
+
+# ---------------------------------------------------------------------------
+# #33 — Path B outbound: BF S2S client_credentials + dispatcher
+# ---------------------------------------------------------------------------
+
+
+def _bf_s2s_token_handler(
+    *,
+    capture: list[dict[str, Any]] | None = None,
+    access_token: str = "BF-S2S",
+    expires_in: int = 3600,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Mock the BF S2S ``client_credentials`` POST. Captures the
+    posted form fields so tests can assert audience / grant / scope
+    are correct. Anything that's NOT a ``client_credentials`` with
+    the BF scope returns 400 so we surface unexpected callers."""
+    if capture is None:
+        capture = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        body = req.content.decode()
+        params: dict[str, str] = {}
+        for kv in body.split("&"):
+            k, _, v = kv.partition("=")
+            params[k] = urllib.parse.unquote_plus(v)
+        capture.append(
+            {
+                "url": str(req.url),
+                "grant_type": params.get("grant_type"),
+                "scope": params.get("scope"),
+                "client_id": params.get("client_id"),
+                "client_secret": params.get("client_secret"),
+            }
+        )
+        if (
+            params.get("grant_type") == "client_credentials"
+            and params.get("scope") == BF_S2S_SCOPE
+        ):
+            return httpx.Response(
+                200, json={"access_token": access_token, "expires_in": expires_in}
+            )
+        return httpx.Response(400, json={"error": "test_unhandled_token_request"})
+
+    return handler
+
+
+class TestAcquireBfS2sToken:
+    """Path B outbound (#33): simple ``client_credentials`` against the
+    tenant token endpoint with BF audience scope."""
+
+    async def test_mints_token_with_bf_scope(self) -> None:
+        capture: list[dict[str, Any]] = []
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_bf_s2s_token_handler(capture=capture))
+        ) as client:
+            tok = await acquire_bf_s2s_token(
+                client=client,
+                tenant_id="tenant-1",
+                blueprint_client_id="blueprint-app-id",
+                blueprint_client_secret="sek",
+                bf_cache=_BfTokenCache(),
+            )
+        assert tok == "BF-S2S"
+        assert len(capture) == 1
+        req = capture[0]
+        assert req["grant_type"] == "client_credentials"
+        assert req["scope"] == BF_S2S_SCOPE
+        assert req["client_id"] == "blueprint-app-id"
+        assert req["client_secret"] == "sek"
+        # POSTs against the tenant-scoped endpoint (SingleTenant bot).
+        assert req["url"] == TENANT_TOKEN_URL_TEMPLATE.format(tenant_id="tenant-1")
+
+    async def test_caches_token_per_tenant_and_scope(self) -> None:
+        """One POST then one cache hit — second call doesn't re-mint."""
+        capture: list[dict[str, Any]] = []
+        cache = _BfTokenCache()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_bf_s2s_token_handler(capture=capture))
+        ) as client:
+            for _ in range(3):
+                await acquire_bf_s2s_token(
+                    client=client,
+                    tenant_id="tenant-1",
+                    blueprint_client_id="blueprint-app-id",
+                    blueprint_client_secret="sek",
+                    bf_cache=cache,
+                )
+        assert len(capture) == 1
+
+    async def test_refreshes_when_within_skew_of_expiry(self) -> None:
+        """If the cached entry is within ``TOKEN_REFRESH_SKEW_SECONDS``
+        of expiry, we re-mint rather than serve a stale token."""
+        from hermes_a365.activity_bridge import TOKEN_REFRESH_SKEW_SECONDS
+
+        capture: list[dict[str, Any]] = []
+        cache = _BfTokenCache()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                _bf_s2s_token_handler(capture=capture, expires_in=1)
+            )
+        ) as client:
+            # First call mints at now=0, expires at 1.
+            await acquire_bf_s2s_token(
+                client=client,
+                tenant_id="tenant-1",
+                blueprint_client_id="blueprint-app-id",
+                blueprint_client_secret="sek",
+                bf_cache=cache,
+                now=0.0,
+            )
+            # Second call at now=0 should be cached (within freshness).
+            # ...but the skew window is 5 min, so it should refresh
+            # immediately because exp - skew < now.
+            await acquire_bf_s2s_token(
+                client=client,
+                tenant_id="tenant-1",
+                blueprint_client_id="blueprint-app-id",
+                blueprint_client_secret="sek",
+                bf_cache=cache,
+                now=0.0,
+            )
+        # 1s ttl < 300s skew → refresh on every call.
+        assert len(capture) == 2
+        _ = TOKEN_REFRESH_SKEW_SECONDS  # silence unused-import lint
+
+    async def test_aadsts82001_re_raises_with_operator_hint(self) -> None:
+        """When Microsoft returns AADSTS82001 (the agentic-app policy
+        denial), we re-raise with a clear pointer to the separate-identity
+        follow-up rather than passing through the bare 400."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400,
+                json={
+                    "error": "unauthorized_client",
+                    "error_description": (
+                        "AADSTS82001: Agentic application 'app-id' is "
+                        "not permitted to request app-only tokens for "
+                        "resource '8d2d3342-cf29-4959-9577-0e0eafbd16bc'."
+                    ),
+                    "error_codes": [82001],
+                },
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            with pytest.raises(
+                TokenAcquisitionError, match="Agentic application"
+            ):
+                await acquire_bf_s2s_token(
+                    client=client,
+                    tenant_id="tenant-1",
+                    blueprint_client_id="blueprint-app-id",
+                    blueprint_client_secret="sek",
+                    bf_cache=_BfTokenCache(),
+                )
+
+    async def test_other_400_re_raises_as_http_error(self) -> None:
+        """A non-82001 4xx surfaces as the regular httpx HTTPStatusError —
+        we only special-case the AADSTS82001 path."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400, json={"error": "invalid_request", "error_codes": [70002]}
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            with pytest.raises(httpx.HTTPStatusError):
+                await acquire_bf_s2s_token(
+                    client=client,
+                    tenant_id="tenant-1",
+                    blueprint_client_id="blueprint-app-id",
+                    blueprint_client_secret="sek",
+                    bf_cache=_BfTokenCache(),
+                )
+
+    async def test_distinct_tenants_get_separate_cache_entries(self) -> None:
+        capture: list[dict[str, Any]] = []
+        cache = _BfTokenCache()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_bf_s2s_token_handler(capture=capture))
+        ) as client:
+            await acquire_bf_s2s_token(
+                client=client,
+                tenant_id="tenant-A",
+                blueprint_client_id="bp",
+                blueprint_client_secret="s",
+                bf_cache=cache,
+            )
+            await acquire_bf_s2s_token(
+                client=client,
+                tenant_id="tenant-B",
+                blueprint_client_id="bp",
+                blueprint_client_secret="s",
+                bf_cache=cache,
+            )
+        # Different tenants → different cache keys → both minted.
+        assert len(capture) == 2
+
+
+class TestInboundPathTag:
+    """The dispatcher's path classifier (#33). Pure function over the
+    inbound activity shape."""
+
+    def test_path_a_when_agentic_ids_present(self) -> None:
+        assert _inbound_path_tag(_inbound_message_activity()) == "A"
+
+    def test_path_a_when_tenant_falls_back_to_conversation(self) -> None:
+        a = _inbound_message_activity()
+        a["recipient"].pop("tenantId")
+        # conversation.tenantId still set
+        assert _inbound_path_tag(a) == "A"
+
+    def test_path_b_when_no_agentic_but_bf_service_url(self) -> None:
+        a = _inbound_message_activity()
+        a["recipient"].pop("agenticAppId")
+        a["recipient"].pop("agenticUserId")
+        a["serviceUrl"] = "https://smba.trafficmanager.net/teams/"
+        assert _inbound_path_tag(a) == "B"
+
+    def test_path_b_via_botframework_com_suffix(self) -> None:
+        a = _inbound_message_activity()
+        a["recipient"].pop("agenticAppId")
+        a["recipient"].pop("agenticUserId")
+        a["serviceUrl"] = "https://directline.botframework.com/"
+        assert _inbound_path_tag(a) == "B"
+
+    def test_unknown_when_no_agentic_and_non_bf_service_url(self) -> None:
+        a = _inbound_message_activity()
+        a["recipient"].pop("agenticAppId")
+        a["recipient"].pop("agenticUserId")
+        a["serviceUrl"] = "https://attacker.example/"
+        assert _inbound_path_tag(a) == "unknown"
+
+    def test_unknown_when_only_agentic_app_id_present(self) -> None:
+        """One of the two agentic fields isn't enough — defence in
+        depth against partial/forged shapes."""
+        a = _inbound_message_activity()
+        a["recipient"].pop("agenticUserId")
+        a["serviceUrl"] = "https://attacker.example/"
+        assert _inbound_path_tag(a) == "unknown"
+
+    def test_unknown_when_no_service_url(self) -> None:
+        a = _inbound_message_activity()
+        a["recipient"].pop("agenticAppId")
+        a["recipient"].pop("agenticUserId")
+        a["serviceUrl"] = ""
+        assert _inbound_path_tag(a) == "unknown"
+
+
+class TestAcquireReplyTokenDispatcher:
+    """The single dispatch site for outbound token mints (#33).
+    Routes Path A → user-FIC chain, Path B → BF S2S, raises on
+    unknown."""
+
+    async def test_path_a_routes_to_user_fic_chain(self) -> None:
+        capture: list[dict[str, Any]] = []
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_agentic_token_handler(capture=capture))
+        ) as client:
+            token, path = await acquire_reply_token(
+                client=client,
+                cfg=_cfg(),
+                activity=_inbound_message_activity(),
+                fmi_cache=_FmiCache(),
+                user_cache=_UserTokenCache(),
+                bf_cache=_BfTokenCache(),
+            )
+        assert (token, path) == ("FINAL", "A")
+        # Three POSTs (T1, T2, user_fic) — the full Path A chain.
+        assert [c["grant_type"] for c in capture] == [
+            "client_credentials",
+            "client_credentials",
+            "user_fic",
+        ]
+
+    async def test_path_b_routes_to_bf_s2s_mint(self) -> None:
+        capture: list[dict[str, Any]] = []
+        # Build a Path B inbound (no agentic ids, BF serviceUrl).
+        a = _inbound_message_activity()
+        a["recipient"].pop("agenticAppId")
+        a["recipient"].pop("agenticUserId")
+        a["recipient"].pop("tenantId")
+        a["conversation"].pop("tenantId")
+        a["serviceUrl"] = "https://smba.trafficmanager.net/emea/"
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_bf_s2s_token_handler(capture=capture))
+        ) as client:
+            token, path = await acquire_reply_token(
+                client=client,
+                cfg=_cfg(),
+                activity=a,
+                fmi_cache=_FmiCache(),
+                user_cache=_UserTokenCache(),
+                bf_cache=_BfTokenCache(),
+            )
+        assert (token, path) == ("BF-S2S", "B")
+        # One POST: client_credentials with BF audience.
+        assert len(capture) == 1
+        assert capture[0]["grant_type"] == "client_credentials"
+        assert capture[0]["scope"] == BF_S2S_SCOPE
+
+    async def test_unknown_path_raises(self) -> None:
+        """An inbound that's neither Path A nor Path B must raise —
+        no guessing at audience. The dispatcher refuses to mint
+        rather than POST a bearer for the wrong resource."""
+        a = _inbound_message_activity()
+        a["recipient"].pop("agenticAppId")
+        a["recipient"].pop("agenticUserId")
+        a["serviceUrl"] = "https://attacker.example/"
+        async with httpx.AsyncClient() as client:
+            with pytest.raises(RuntimeError, match="cannot classify"):
+                await acquire_reply_token(
+                    client=client,
+                    cfg=_cfg(),
+                    activity=a,
+                    fmi_cache=_FmiCache(),
+                    user_cache=_UserTokenCache(),
+                    bf_cache=_BfTokenCache(),
+                )
 
 
 # ---------------------------------------------------------------------------

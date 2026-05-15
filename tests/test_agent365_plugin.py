@@ -198,16 +198,32 @@ def _make_inbound(
     conv_id: str = "conv-1",
     activity_id: str = "act-1",
     service_url: str = "https://smba.trafficmanager.net/amer/x/",
+    path: str = "A",
 ) -> dict[str, Any]:
-    """Synthesise a BF activity in the shape the bridge sees from A365."""
+    """Synthesise a BF activity in the shape the bridge sees.
+
+    Default is Path A (A365 agentic-user routing): recipient carries
+    ``agenticAppId`` + ``agenticUserId`` + tenantId. Pass ``path="B"``
+    for a classic Bot Framework shape with no agentic identifiers
+    (used for #33 dispatch tests). The default shape is Path A
+    because most route-level tests want to exercise the legacy A365
+    outbound chain.
+    """
+    recipient: dict[str, Any] = {"id": "agent-1", "name": "Inbox Helper"}
+    conv: dict[str, Any] = {"id": conv_id, "conversationType": "personal"}
+    if path == "A":
+        recipient["agenticAppId"] = "agentic-app-1"
+        recipient["agenticUserId"] = "agentic-user-1"
+        recipient["tenantId"] = "11111111-1111-1111-1111-111111111111"
+        conv["tenantId"] = "11111111-1111-1111-1111-111111111111"
     return {
         "type": "message",
         "id": activity_id,
         "channelId": "msteams",
         "serviceUrl": service_url,
-        "conversation": {"id": conv_id, "conversationType": "personal"},
+        "conversation": conv,
         "from": {"id": "user-1", "name": "Sadiq"},
-        "recipient": {"id": "agent-1", "name": "Inbox Helper"},
+        "recipient": recipient,
         "text": text,
     }
 
@@ -1318,37 +1334,64 @@ class TestBuildProactiveTargetSpec:
         assert spec["recipient"]["id"] == "user-1"
         assert spec["recipient"]["name"] == "Sadiq"
 
-    def test_path_tag_unknown_when_agentic_fields_missing(
+    def test_path_tag_b_when_agentic_fields_missing_but_bf_service_url(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Path B (Custom Engine Agent) or sibling-shape inbound has no
-        # agenticAppId / agenticUserId on the recipient — tag accordingly
-        # so the send-side can hit the deferred-error path rather than
-        # silently 401.
+        """#33 refined the tagger: a classic-BF-shaped inbound (no
+        agentic ids + serviceUrl on the BF host-suffix allowlist) is
+        now tagged ``"B"`` instead of ``"unknown"``, so the proactive
+        send-side hits the BF S2S outbound branch via
+        ``acquire_reply_token``."""
         from hermes_a365.plugin.conversations import ConversationRef
 
         a = _make_adapter(monkeypatch)
         inbound = self._seed_path_a_inbound()
         inbound["recipient"].pop("agenticAppId")
         inbound["recipient"].pop("agenticUserId")
+        # serviceUrl default = smba.trafficmanager.net → Path B
         a._conversations.upsert(ConversationRef.from_activity(inbound))
 
         spec = a._build_proactive_target_spec("conv-proactive")
         assert spec is not None
-        assert spec["path"] == "unknown"
+        assert spec["path"] == "B"
         assert spec["agentic_app_id"] == ""
         assert spec["agentic_user_id"] == ""
 
-    def test_path_tag_unknown_when_only_one_agentic_field_present(
+    def test_path_tag_b_when_only_one_agentic_field_present(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A malformed inbound with only one of the two agentic fields
-        # is also untrustworthy for Path A token minting.
+        """A malformed inbound with only one of the two agentic fields
+        is not classifiable as Path A. If the serviceUrl is BF-shaped
+        we fall through to Path B (#33); the BF S2S outbound bearer
+        doesn't depend on either agentic field, so this is a safer
+        recovery than refusing the send."""
         from hermes_a365.plugin.conversations import ConversationRef
 
         a = _make_adapter(monkeypatch)
         inbound = self._seed_path_a_inbound()
         inbound["recipient"].pop("agenticUserId")
+        a._conversations.upsert(ConversationRef.from_activity(inbound))
+
+        spec = a._build_proactive_target_spec("conv-proactive")
+        assert spec is not None
+        assert spec["path"] == "B"
+
+    def test_path_tag_unknown_when_agentic_missing_and_non_bf_service_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the serviceUrl host isn't on the BF allowlist either
+        (e.g. somebody's posted a forged inbound through a tunnel),
+        the tagger refuses to classify — the dispatcher will then
+        raise rather than guess. Belt-and-braces against an attacker
+        who could otherwise steer outbound traffic by claiming an
+        unknown serviceUrl."""
+        from hermes_a365.plugin.conversations import ConversationRef
+
+        a = _make_adapter(monkeypatch)
+        inbound = self._seed_path_a_inbound()
+        inbound["recipient"].pop("agenticAppId")
+        inbound["recipient"].pop("agenticUserId")
+        inbound["serviceUrl"] = "https://attacker.example/"
         a._conversations.upsert(ConversationRef.from_activity(inbound))
 
         spec = a._build_proactive_target_spec("conv-proactive")
@@ -1783,20 +1826,26 @@ class TestSendProactive:
         assert body["recipient"]["id"] == "user-1"
 
     @pytest.mark.asyncio
-    async def test_path_unknown_returns_deferred_error_referencing_16(
+    async def test_path_unknown_returns_classification_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """#33 retired the Path B-specific "deferred error referencing
+        #16" message. The remaining unknown-path case is now
+        genuinely unclassifiable: no agentic ids AND non-BF
+        serviceUrl. The wrapper refuses to mint a token rather than
+        guess at an audience."""
         from hermes_a365.plugin.conversations import ConversationRef
 
         a = _make_adapter(monkeypatch)
-        # Inbound without agenticAppId / agenticUserId — path:unknown.
+        # Inbound without agentic ids AND with a non-BF serviceUrl
+        # (so the path tagger emits "unknown" rather than "B").
         a._conversations.upsert(
             ConversationRef.from_activity(
                 {
                     "type": "message",
                     "id": "act-most-recent",
-                    "serviceUrl": "https://smba.trafficmanager.net/",
-                    "conversation": {"id": "conv-pb", "conversationType": "personal"},
+                    "serviceUrl": "https://attacker.example/",
+                    "conversation": {"id": "conv-unknown", "conversationType": "personal"},
                     "from": {"id": "user-1"},
                     "recipient": {"id": "bot-1"},
                 }
@@ -1804,10 +1853,97 @@ class TestSendProactive:
         )
         monkeypatch.setattr(a, "_cached_inbound_for", lambda _chat_id: None)
 
-        result = await a.send(chat_id="conv-pb", content="ping")
+        result = await a.send(chat_id="conv-unknown", content="ping")
         assert result.success is False
-        assert "Path B" in (result.error or "")
-        assert "#16" in (result.error or "")
+        assert "cannot classify" in (result.error or "").lower() or (
+            "unknown" in (result.error or "").lower()
+        )
+
+    def _seed_registry_path_b(
+        self, adapter, *, conv_id: str = "conv-proactive-b"
+    ) -> None:
+        """#33: a classic Bot Framework inbound shape — no agentic
+        identifiers, serviceUrl on the BF host-suffix allowlist."""
+        from hermes_a365.plugin.conversations import ConversationRef
+
+        adapter._conversations.upsert(
+            ConversationRef.from_activity(
+                {
+                    "type": "message",
+                    "id": "act-most-recent",
+                    "channelId": "msteams",
+                    "serviceUrl": "https://smba.trafficmanager.net/emea/x/",
+                    "conversation": {
+                        "id": conv_id,
+                        "conversationType": "personal",
+                        "tenantId": "11111111-2222-3333-4444-555555555555",
+                    },
+                    "from": {"id": "user-bf", "name": "BF User"},
+                    "recipient": {
+                        "id": "bot-app-id",
+                        "name": "Inbox Helper R8 CC",
+                    },
+                    "text": "earlier message from Copilot Chat",
+                }
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_path_b_happy_mints_bf_s2s_and_posts_to_send_to_conversation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#33 (slice 20e): a Path B proactive send mints a BF S2S
+        bearer via the dispatcher, then POSTs the same
+        ``sendToConversation`` URL Path A uses (only the bearer
+        differs)."""
+        a = _make_adapter(monkeypatch)
+        self._seed_registry_path_b(a, conv_id="conv-pb")
+        a._bridge_cfg = MagicMock()
+        a._bridge_cfg.tenant_id = "tenant-b"
+        a._bridge_cfg.blueprint_client_id = "blueprint-app-id"
+        a._bridge_cfg.blueprint_client_secret = "sek"
+        a._fmi_cache = MagicMock()
+        a._user_cache = MagicMock()
+        a._bf_token_cache = MagicMock()
+
+        bridge = adapter_mod._import_bridge()
+        monkeypatch.setattr(
+            bridge,
+            "acquire_reply_token",
+            AsyncMock(return_value=("bf-bearer", "B")),
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 201
+        mock_resp.json = MagicMock(return_value={"id": "new-bf-activity-id"})
+        a._http_client = MagicMock()
+        a._http_client.post = AsyncMock(return_value=mock_resp)
+
+        # Force the proactive path.
+        monkeypatch.setattr(a, "_cached_inbound_for", lambda _chat_id: None)
+
+        result = await a.send(chat_id="conv-pb", content="hi from cron")
+
+        assert result.success is True
+        assert result.message_id == "new-bf-activity-id"
+        called = a._http_client.post.await_args
+        # Same sendToConversation URL shape as Path A.
+        assert called.args[0] == (
+            "https://smba.trafficmanager.net/emea/x/v3/conversations/conv-pb/activities"
+        )
+        # Bearer comes from the BF S2S dispatcher path.
+        assert called.kwargs["headers"]["Authorization"] == "Bearer bf-bearer"
+        body = called.kwargs["json"]
+        assert "replyToId" not in body
+        assert body["text"] == "hi from cron"
+        # Dispatcher was passed the synthetic activity with serviceUrl
+        # so it could classify Path B.
+        dispatcher_call = bridge.acquire_reply_token.await_args.kwargs
+        assert (
+            dispatcher_call["activity"]["serviceUrl"]
+            == "https://smba.trafficmanager.net/emea/x/"
+        )
+        assert dispatcher_call["bf_cache"] is a._bf_token_cache
 
     @pytest.mark.asyncio
     async def test_token_mint_failure_surfaces_in_send_result(
@@ -2590,6 +2726,7 @@ class TestEditMessage:
         a._bridge_cfg = MagicMock()
         a._fmi_cache = MagicMock()
         a._user_cache = MagicMock()
+        a._bf_token_cache = MagicMock()  # #33: dispatcher needs a cache to pass through
 
         if post_responses is None:
             post_responses = MagicMock(status_code=202, text="", json=lambda: {})
@@ -2602,11 +2739,16 @@ class TestEditMessage:
 
     @staticmethod
     def _patch_token_mint(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Patch the dispatcher (#33). All five outbound surfaces in
+        the adapter funnel through ``acquire_reply_token`` since #33,
+        so a single monkeypatch covers everything that used to go
+        directly to ``acquire_outbound_token`` (Path A) or
+        ``acquire_bf_s2s_token`` (Path B)."""
         bridge = adapter_mod._import_bridge()
         monkeypatch.setattr(
             bridge,
-            "acquire_outbound_token",
-            AsyncMock(return_value="bearer-test"),
+            "acquire_reply_token",
+            AsyncMock(return_value=("bearer-test", "A")),
         )
 
     @staticmethod
