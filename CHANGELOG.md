@@ -6,16 +6,148 @@ follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-18
+
+Path B (Custom Engine Agent + Azure Bot Service) Copilot Chat
+surfacing closes the headline value-prop gap vs. v0.5.x's Path A-only
+shape. Agents now reach M365 Copilot Chat, Word/Excel/PowerPoint/Outlook
+side-panels, and classic Teams via the same `/api/messages` route
+that already handles AI Teammate traffic. First initial-walkthrough
+operator wrapper (`bot-service create + verify`) ships alongside.
+
+Live-validated end-to-end against the satscryption Azure GA tenant
+on 2026-05-18 — M365 Copilot Chat round-trip + Teams round-trip +
+WebChat API round-trip all green.
+
 ### Added
 
-- **Slice 20a (#29):** `hermes-a365 bot-service` / `hermes a365
-  bot-service` verb tree with `create` and `verify` for Path B Azure
-  Bot Service. `create --apply` auto-registers the `Microsoft.BotService`
-  provider, ensures the resource group, creates or reuses the bot bound
-  to `A365_BF_APP_ID`, enables Microsoft Teams with the accepted-terms
-  ARM PATCH, and writes `a365.bot-service.config.json` mode 0600.
-  `verify` checks provider/resource/channel drift and can run a live
-  Direct Line auth probe with `--directline-probe`.
+- **Path B inbound (#34)** — `validate_inbound_jwt_bf` in
+  `activity_bridge.py` accepts classic Bot Framework S2S tokens
+  (`iss=https://api.botframework.com`) alongside the slice 19f A365
+  AAD-v2 path. Route handler at `plugin/adapter.py:419` peeks the
+  unverified `iss` claim and dispatches to the right validator.
+  BF JWKS via `https://login.botframework.com/v1/.well-known/openidconfiguration`,
+  RS256, 5-min skew, audience matches the bot's `--appid`.
+  `serviceUrl` claim match is validated when present but treated as
+  optional after the 2026-05-15 walk showed real BF Connector→Bot
+  tokens don't carry the claim despite Microsoft's docs (requirement
+  7) saying they must.
+- **Path B outbound (#33)** — `acquire_bf_s2s_token` mints classic
+  BF `client_credentials` bearers against the bot's tenant token
+  endpoint, scope `https://api.botframework.com/.default`. Cached
+  per `(tenant_id, scope)` in a new `_BfTokenCache`. Dispatched via
+  a new `acquire_reply_token` that routes Path A → user-FIC chain
+  (existing) and Path B → BF S2S, raises on unknown. All five
+  outbound surfaces (`send_reply`, `_send_proactive`,
+  `_send_stream_start`, `_post_activity`, `edit_message`) funnel
+  through the dispatcher. AADSTS82001 is detected specifically and
+  re-raised as a `TokenAcquisitionError` whose message points
+  operators at `A365_BF_APP_ID` / `A365_BF_CLIENT_SECRET` for the
+  non-agentic identity fix (#36).
+- **Path B Entra identity threading (#36)** — `BridgeConfig` gains
+  optional `bf_app_id` + `bf_client_secret` fields; `load_bridge_config`
+  reads `A365_BF_APP_ID` / `A365_BF_CLIENT_SECRET` from the per-agent
+  `.env`. When set, both the inbound `expected_app_id` audience check
+  and the outbound BF S2S mint use the separate non-agentic Path B
+  identity. Empty defaults fall back to the blueprint app for
+  backwards compat with Path A-only operators. Half-configured
+  (only one of the two fields set) falls back defensively.
+- **`hermes-a365 bot-service` verb (#29, slice 20a)** — new CLI
+  surface with `create` and `verify` subcommands wraps every step
+  of §11.3 + §11.4 + parts of §11.2.5:
+  - auto-registers `Microsoft.BotService` resource provider on the
+    sub (deterministic blocker on fresh subs)
+  - ensures the resource group at a regional `--location <region>`
+  - creates the Azure Bot resource with
+    `--app-type SingleTenant --appid <A365_BF_APP_ID> --location global`
+  - refuses unsafe in-place fix when an existing bot's `msaAppId`
+    drifts from the configured Path B app id (Azure can't change
+    `--appid` post-creation; forces deliberate delete+recreate)
+  - updates the bot endpoint in-place via `az bot update --endpoint`
+    when only the tunnel URL drifted
+  - enables the Microsoft Teams channel
+  - applies the load-bearing `acceptedTerms` ARM PATCH that
+    `az bot msteams create` alone leaves un-set (silent
+    traffic-drop without it)
+  - writes `a365.bot-service.config.json` at mode 0600 as a
+    gitignored sidecar
+  - `verify --directline-probe` mints a real Direct Line conversation
+    + posts an activity, watching for the Path B 403 / BotError
+    failure shape. Collapses §11.10's multi-step Direct Line recipe
+    into a single CLI flag.
+- **Custom Engine Agent manifest scope expansion** — `publish
+  --copilot-chat` now emits `scopes: ["copilot", "personal", "team"]`
+  (was `["personal"]`) and includes an `isNotificationOnly: false`
+  flag plus a `commandLists` entry. Required for the agent to
+  actually surface in M365 Copilot Chat (the 2026-05-18 walk
+  uncovered that `personal`-only `scopes` produced an `Oops!
+  Something happened. Can you try again?` error in Copilot Chat).
+- **`publish --bot-id <bf-app-id>` flag for Path B** — emits CEA
+  zips whose `bots[]` block references the separate non-agentic
+  Path B app id rather than the default-extracted blueprint app id.
+- **`doctor a365_cli` probe (#35)** — version-floor check for the
+  Microsoft#408 secret-persistence regression. CLI ≤ 1.1.181
+  triggers a `WARN` with an upgrade hint; > 1.1.181 also `WARN`s
+  (not yet live-verified clean); unparseable `WARN`s with a
+  diagnostic message. The `OK` state is deliberately unreachable
+  until a future CLI build is live-walked and confirmed clean —
+  observed reality (CLI 1.1.181 still reproduces #408 against
+  macOS, despite Microsoft's reported fix) takes precedence over
+  the published release notes.
+
+### Changed
+
+- **`instance create --apply` propagates Path B env vars (#40)** —
+  `A365_BF_APP_ID` / `A365_BF_CLIENT_SECRET` set in the operator
+  `~/.hermes/.env` now flow into the per-agent `.env` rendered by
+  `instance create`. Existing user-managed env keys outside the
+  renderer's managed set are preserved across re-runs (so e.g.
+  `A365_ALLOW_ALL_USERS=true` set by hand for testing survives an
+  `instance create --apply`).
+
+### Documented
+
+- **`references/live-tenant-test.md` §11** — Path B end-to-end runbook
+  drafted from Microsoft docs (Phase 1, 2026-05-14) + walked live
+  against the satscryption Azure GA sub (Phase 2, 2026-05-14 + 2026-05-18).
+  New §11.2.5 covers the operator-side Entra app registration for
+  Path B, `Bot.Connector` admin consent, env-var write, and the
+  bot-resource migration recipe (because `az bot update` can't change
+  `--appid`). §11.4 documents the load-bearing `acceptedTerms` ARM
+  PATCH (no CLI flag exposes it; channel creation silently leaves
+  it `false` and Microsoft drops traffic). §11.6 references
+  `--bot-id <bf-app-id>` for Path B publish. §11.7 resolved the
+  upload destination uncertainty to MAC → Agents → Upload custom
+  agent. §11.10 logs every walking finding for future maintainers.
+
+### Closed issues
+
+- **#16** Slice 19u: M365 Copilot Chat surfacing — validated
+  end-to-end against the satscryption tenant.
+- **#28** Slice 20-pre Path B runbook — Phase 1 + Phase 2 walked.
+- **#29** Slice 20a `bot-service create + verify + sidecar`.
+- **#33** Slice 20e Path B outbound dispatcher + BF S2S mint.
+- **#34** Slice 20 inbound Path B JWT validator branch.
+- **#36** Slice 20e follow-up: non-agentic Entra app for Path B
+  outbound (wrapper-side; operator walk closed it).
+- **#40** `instance create` propagates Path B BF env vars.
+- **#35** doctor probe for Microsoft#408 (still upstream-open as of
+  2026-05-18 against CLI 1.1.181 — probe stays conservative).
+
+### Operator notes
+
+Operators on Path A can ignore most of this release — the dispatcher
+falls back to the existing user-FIC chain by default. Path B Copilot
+Chat surfacing requires the operator-side §11.2.5 walk (register a
+separate non-agentic Entra app + grant `Bot.Connector` admin consent
++ set `A365_BF_APP_ID` / `A365_BF_CLIENT_SECRET` in `~/.hermes/.env`).
+Once the env vars are set, `hermes-a365 bot-service create --apply`
+handles the Azure side end-to-end including the `acceptedTerms`
+ARM PATCH that `az bot msteams create` alone leaves un-set.
+
+The `--auto-recover-secret` flag on `register --apply` stays opt-in
+and remains the recommended workaround for the Microsoft#408
+regression on CLI 1.1.181 and earlier.
 
 ## [0.5.2] — 2026-05-13
 
