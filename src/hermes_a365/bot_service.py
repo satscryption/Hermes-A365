@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable
@@ -129,6 +130,29 @@ def derive_bot_name(agent_name: str) -> str:
     if len(name) < 4:
         name = f"{name}0000"[:4]
     return name
+
+
+def resolve_default_region(*, runner: CommandRunner | None = None) -> tuple[str, str]:
+    """Return the create-region default and where it came from.
+
+    Operators often configure ``az config set defaults.location=<region>``.
+    Respect that before falling back to the historical satscryption
+    walkthrough default.
+    """
+    if runner is None:
+        runner = SubprocessRunner()
+    try:
+        result = runner.run(
+            ["az", "config", "get", "defaults.location", "--query", "value", "-o", "tsv"],
+            timeout=10.0,
+        )
+    except BotServiceError:
+        return _DEFAULT_REGION, "built-in fallback"
+    if result.returncode == 0:
+        value = result.stdout.strip()
+        if value:
+            return value, "az config defaults.location"
+    return _DEFAULT_REGION, "built-in fallback"
 
 
 @dataclass
@@ -654,6 +678,65 @@ def _teams_channel_url(subscription_id: str, resource_group: str, bot_name: str)
     )
 
 
+def _app_id_drift_recovery_commands(
+    inputs: BotServiceCreateInputs,
+    *,
+    bot_name: str,
+    app_id: str,
+    tenant_id: str,
+    subscription_id: str,
+) -> str:
+    create_argv = [
+        "hermes-a365",
+        "bot-service",
+        "create",
+        "--agent-name",
+        inputs.agent_name,
+        "--resource-group",
+        inputs.resource_group,
+        "--endpoint",
+        inputs.endpoint,
+        "--appid",
+        app_id,
+        "--tenant-id",
+        tenant_id,
+        "--subscription-id",
+        subscription_id,
+        "--bot-name",
+        bot_name,
+        "--region",
+        inputs.region,
+        "--sku",
+        inputs.sku,
+        "--sidecar",
+        str(inputs.sidecar_path),
+        "--apply",
+    ]
+    commands = [
+        [
+            "az",
+            "bot",
+            "msteams",
+            "delete",
+            "--resource-group",
+            inputs.resource_group,
+            "--name",
+            bot_name,
+        ],
+        [
+            "az",
+            "bot",
+            "delete",
+            "--resource-group",
+            inputs.resource_group,
+            "--name",
+            bot_name,
+        ],
+        create_argv,
+    ]
+    return "\n".join(shlex.join(argv) for argv in commands)
+
+
 def _patch_teams_terms(
     runner: CommandRunner,
     *,
@@ -797,7 +880,15 @@ def apply_create_plan(
             raise BotServiceError(
                 f"existing bot {bot_name} is bound to msaAppId={existing_app_id}, "
                 f"but Path B expects {app_id}. Azure cannot change --appid in-place; "
-                "delete/recreate the bot resource deliberately."
+                "delete/recreate the bot resource deliberately.\n\n"
+                "Paste-ready recovery:\n"
+                + _app_id_drift_recovery_commands(
+                    inputs,
+                    bot_name=bot_name,
+                    app_id=app_id,
+                    tenant_id=tenant_id,
+                    subscription_id=subscription_id,
+                )
             )
         if _bot_endpoint(bot).rstrip("/") != inputs.endpoint.rstrip("/"):
             bot = _json_from_result(
@@ -1412,8 +1503,10 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     )
     create.add_argument(
         "--region",
-        default=_DEFAULT_REGION,
-        help=f"resource group region (default: {_DEFAULT_REGION})",
+        help=(
+            "resource group region (default: az config defaults.location, "
+            f"then {_DEFAULT_REGION})"
+        ),
     )
     create.add_argument(
         "--sku",
@@ -1496,11 +1589,15 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
 
 def _run_create(args: argparse.Namespace) -> int:
     try:
+        region = args.region
+        if region is None:
+            region, region_source = resolve_default_region()
+            sys.stdout.write(f"[info] defaulting --region to {region} ({region_source})\n")
         inputs = BotServiceCreateInputs(
             agent_name=args.agent_name,
             resource_group=args.resource_group,
             endpoint=args.endpoint,
-            region=args.region,
+            region=region,
             sku=args.sku,
             tenant_id=args.tenant_id,
             app_id=args.app_id,

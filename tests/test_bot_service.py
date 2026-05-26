@@ -29,6 +29,7 @@ from hermes_a365.bot_service import (
     build_enable_channel_plan,
     build_update_endpoint_plan,
     derive_bot_name,
+    resolve_default_region,
     verify_bot_service,
 )
 
@@ -45,15 +46,21 @@ class FakeRunner:
         teams: dict[str, Any] | None = None,
         group_exists: bool = True,
         provider_state: str = "Registered",
+        default_location: str | None = None,
     ) -> None:
         self.bot = bot
         self.teams = teams
         self.group_exists = group_exists
         self.provider_state = provider_state
+        self.default_location = default_location
         self.calls: list[list[str]] = []
 
     def run(self, argv: list[str], *, timeout: float = 120.0) -> CommandResult:
         self.calls.append(list(argv))
+        if argv[:3] == ["az", "config", "get"]:
+            if self.default_location is None:
+                return CommandResult(argv, 1, stderr="defaults.location is not set")
+            return CommandResult(argv, 0, stdout=f"{self.default_location}\n")
         if argv[:3] == ["az", "account", "show"]:
             return self._ok({"id": SUBSCRIPTION_ID, "tenantId": TENANT_ID}, argv)
         if argv[:3] == ["az", "provider", "register"]:
@@ -168,6 +175,20 @@ def test_derive_bot_name_matches_playbook_shape() -> None:
     assert len(derive_bot_name("A" * 80)) <= 42
 
 
+def test_resolve_default_region_prefers_az_config() -> None:
+    region, source = resolve_default_region(runner=FakeRunner(default_location="uksouth"))
+
+    assert region == "uksouth"
+    assert source == "az config defaults.location"
+
+
+def test_resolve_default_region_falls_back_when_az_config_empty() -> None:
+    region, source = resolve_default_region(runner=FakeRunner(default_location=None))
+
+    assert region == "westeurope"
+    assert source == "built-in fallback"
+
+
 def test_create_apply_writes_0600_sidecar_and_enables_teams(tmp_path: Path) -> None:
     runner = FakeRunner(group_exists=False)
     plan = build_create_plan(_inputs(tmp_path), operator_env={"A365_BF_APP_ID": BF_APP_ID})
@@ -218,7 +239,7 @@ def test_create_detects_msa_app_id_mismatch_without_autofix(tmp_path: Path) -> N
     runner = FakeRunner(bot=stale_bot, teams=FakeRunner._teams())
     plan = build_create_plan(_inputs(tmp_path), operator_env={"A365_BF_APP_ID": BF_APP_ID})
 
-    with pytest.raises(BotServiceError, match="cannot change --appid"):
+    with pytest.raises(BotServiceError, match="cannot change --appid") as exc:
         apply_create_plan(
             plan,
             runner=runner,
@@ -226,6 +247,13 @@ def test_create_detects_msa_app_id_mismatch_without_autofix(tmp_path: Path) -> N
             now=_now,
         )
 
+    message = str(exc.value)
+    assert "Paste-ready recovery:" in message
+    assert "az bot msteams delete --resource-group hermes-a365-bots" in message
+    assert "az bot delete --resource-group hermes-a365-bots" in message
+    assert "hermes-a365 bot-service create" in message
+    assert "--appid 11111111-1111-1111-1111-111111111111" in message
+    assert "--apply" in message
     assert not (tmp_path / "a365.bot-service.config.json").exists()
 
 

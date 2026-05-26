@@ -192,10 +192,14 @@ def probe_bot_service_az_subscription(
 ) -> DiagnosticResult:
     result = runner.run(["az", "account", "show", "-o", "json"])
     if result.returncode != 0:
+        detail = "az account show failed; run `az login` first"
+        if result.output:
+            detail = f"{detail}: {result.output}"
         return DiagnosticResult(
             "bot_service_az_subscription",
             _WARN,
-            result.output or "az account show failed (run `az login`)",
+            detail,
+            {"skip_az_dependent_probes": True},
         )
     try:
         account = json.loads(result.stdout)
@@ -420,8 +424,10 @@ def collect_bot_service_diagnostics(
     if runtime_auth_probe is None:
         runtime_auth_probe = default_runtime_auth_probe
 
-    results.append(probe_bot_service_az_subscription(config, runner=runner))
-    results.append(probe_bot_service_resource(config, runner=runner))
-    results.append(probe_bot_service_channel_msteams(config, runner=runner))
+    subscription = probe_bot_service_az_subscription(config, runner=runner)
+    results.append(subscription)
+    if not subscription.data.get("skip_az_dependent_probes"):
+        results.append(probe_bot_service_resource(config, runner=runner))
+        results.append(probe_bot_service_channel_msteams(config, runner=runner))
     results.append(runtime_auth_probe(config))
     return results
