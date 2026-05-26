@@ -1281,21 +1281,51 @@ pre-#36 walk, you need to `az bot delete` and re-create with
 
 ### 11.3 — Provision the Azure Bot resource
 
-Per the [`az bot create` reference](https://learn.microsoft.com/en-us/cli/azure/bot#az-bot-create):
+Canonical wrapper path (slice 20a+):
 
 ```bash
-# Resource group (skip if you already have one earmarked). The RG
-# --location is a regional spec for the group's metadata residency
-# (e.g. westeurope, eastus, uksouth); pick a region near you. It is
-# NOT "global" — global is reserved for resources, not groups.
-az group create --name <azure-rg> --location <region>
+hermes-a365 bot-service create \
+    --agent-name "<display-name>" \
+    --resource-group <azure-rg> \
+    --endpoint <tunnel-url>/api/messages \
+    --apply
+```
 
-# Bot resource. --app-type SingleTenant + --appid + --tenant-id binds
-# the bot identity to the SEPARATE non-agentic Path B app from §11.2.5
-# (#36) — NOT the Path A blueprint app, which inherits the Agentic
-# policy class and 401s any BF client_credentials. The bot itself
-# stays --location global (Bot Service is a global Azure resource;
-# the RG's region is just metadata residency).
+The wrapper reads `A365_BF_APP_ID` / `A365_BF_CLIENT_SECRET` from
+`~/.hermes/.env`, auto-registers `Microsoft.BotService`, creates or
+reuses the resource group, creates or reconciles the Bot resource,
+enables the Microsoft Teams channel, applies the load-bearing
+`acceptedTerms` ARM PATCH from §11.4, and writes
+`a365.bot-service.config.json` at mode 0600.
+
+Optional overrides:
+
+```bash
+hermes-a365 bot-service create \
+    --agent-name "<display-name>" \
+    --resource-group <azure-rg> \
+    --endpoint <tunnel-url>/api/messages \
+    --region <region> \
+    --appid <bf-app-id> \
+    --tenant-id <tenant-id> \
+    --subscription-id <subscription-id> \
+    --bot-name <azure-bot-name> \
+    --apply
+```
+
+`--region` is the resource group's metadata region, not the Bot
+resource's location. When omitted, the wrapper reads
+`az config get defaults.location` first and falls back to `westeurope`
+only when the operator has no Azure CLI default location set. The Bot
+resource itself always stays `--location global` per Bot Service
+convention.
+
+Under the hood, the wrapper drives the same Azure operations you would
+run manually per the
+[`az bot create` reference](https://learn.microsoft.com/en-us/cli/azure/bot#az-bot-create):
+
+```bash
+az group create --name <azure-rg> --location <region>
 az bot create \
     --resource-group <azure-rg> \
     --name <azure-bot-name> \
@@ -1307,16 +1337,26 @@ az bot create \
     --location global
 ```
 
+The `--app-type SingleTenant` + `--appid` + `--tenant-id` tuple binds
+the Bot identity to the SEPARATE non-agentic Path B app from §11.2.5
+(#36) — NOT the Path A blueprint app, which inherits the Agentic
+policy class and 401s any BF client_credentials.
+
 ⚠️ **Migration from a pre-#36 bot resource.** If you already
 created the bot with `--appid <blueprint-app-id>` on a pre-#36
 walk, you cannot change `--appid` via `az bot update` (it does not
-expose that parameter). Tear down + re-create:
+expose that parameter). Re-running `bot-service create --apply` now
+refuses the drift and prints paste-ready recovery commands. The manual
+shape is:
 
 ```bash
 az bot msteams delete --resource-group <azure-rg> --name <azure-bot-name>
 az bot delete         --resource-group <azure-rg> --name <azure-bot-name>
-# Then re-run the az bot create block above with --appid <bf-app-id>,
-# followed by §11.4 (msteams channel + acceptedTerms PATCH).
+hermes-a365 bot-service create \
+    --agent-name "<display-name>" \
+    --resource-group <azure-rg> \
+    --endpoint <tunnel-url>/api/messages \
+    --apply
 ```
 
 The bot resource is registration-only on the F0 SKU, so the delete +
@@ -1337,15 +1377,20 @@ this note if Microsoft changes the surface.
 Verify:
 
 ```bash
+hermes-a365 bot-service verify --agent-name "<display-name>"
+```
+
+The raw Azure check remains useful when debugging:
+
+```bash
 az bot show --resource-group <azure-rg> --name <azure-bot-name>
 ```
 
-Expect a JSON object with `properties.endpoint` = your tunnel URL +
-`/api/messages` and `properties.msaAppId` = `<blueprint-app-id>`.
-Also note `properties.enabledChannels` will already contain `webchat`
-+ `directline` — Bot Service auto-enables these two on `create`, no
-explicit `az bot webchat`/`az bot directline create` needed. Only the
-Microsoft Teams channel needs the explicit add step below.
+Expect `properties.endpoint` = your tunnel URL + `/api/messages` and
+`properties.msaAppId` = `<bf-app-id>`. Also note
+`properties.enabledChannels` will already contain `webchat` +
+`directline` — Bot Service auto-enables these two on `create`, no
+explicit `az bot webchat`/`az bot directline create` needed.
 
 ### 11.4 — Enable the Microsoft Teams channel + accept publishing terms
 
@@ -1355,6 +1400,25 @@ Chat (and classic Teams) route activities to `/api/messages`. Per
 "Ensure that your Azure Bot resource has the **Microsoft Teams**
 channel added under **Channels**."
 
+For normal operator walks this is already handled by
+`bot-service create --apply` in §11.3. If you need to repair or re-sync
+the channel later, use the wrapper:
+
+```bash
+hermes-a365 bot-service enable-channel \
+    --agent-name "<display-name>" \
+    --channel msteams \
+    --apply
+```
+
+Re-running is safe: it reports the channel as already enabled and keeps
+`a365.bot-service.config.json::channelsEnabled` in sync. The wrapper
+also reapplies the terms PATCH when the channel exists but
+`acceptedTerms` or `isEnabled` is false.
+
+Under the hood, the wrapper first runs the preview Teams-channel
+command:
+
 ```bash
 az bot msteams create \
     --resource-group <azure-rg> \
@@ -1362,13 +1426,11 @@ az bot msteams create \
 ```
 
 ⚠️ **`az bot msteams create` is incomplete on its own.** Phase 2 walk
-2026-05-14 surfaced a load-bearing finding: the channel provisions with
-`acceptedTerms: false`, and **Microsoft holds all traffic on the channel
-until the publishing terms are accepted**. The Azure CLI does NOT expose
-an `--accepted-terms` (or equivalent) flag, so terms acceptance is
-either a manual Azure Portal step (Portal → your Bot resource →
-Channels → Microsoft Teams → check the terms box → Apply) or a direct
-ARM PATCH:
+2026-05-14 surfaced a load-bearing finding: the channel provisions
+with `acceptedTerms: false`, and **Microsoft holds all traffic on the
+channel until the publishing terms are accepted**. The Azure CLI does
+NOT expose an `--accepted-terms` (or equivalent) flag, so the wrapper
+then applies the direct ARM PATCH:
 
 ```bash
 SUB=<subscription-id>
@@ -1383,9 +1445,9 @@ az rest --method PATCH \
 Without this PATCH the operator's bot endpoint will never see Path B
 traffic and there is **no error surfaced anywhere** — Direct Line
 probes silently return `BotError / Failed to send activity / 403` and
-Test in Web Chat shows nothing. Slice 20a's `bot-service create
---apply` MUST follow `az bot msteams create` with this PATCH or
-operators hit the same dead end.
+Test in Web Chat shows nothing. If you perform raw Azure repair steps
+instead of the wrapper, you must run both `az bot msteams create` and
+the PATCH.
 
 ⚠️ **Preview status.** `az bot msteams` is in Azure CLI **Preview** per
 the [reference](https://learn.microsoft.com/en-us/cli/azure/bot/msteams).
@@ -1399,18 +1461,6 @@ Verify (look for `acceptedTerms: true` AND `isEnabled: true`):
 ```bash
 az bot msteams show --resource-group <azure-rg> --name <azure-bot-name>
 ```
-
-Wrapper path (slice 20b):
-
-```bash
-hermes-a365 bot-service enable-channel \
-    --agent-name "<display-name>" \
-    --channel msteams \
-    --apply
-```
-
-Re-running is safe: it reports the channel as already enabled and
-keeps `a365.bot-service.config.json::channelsEnabled` in sync.
 
 Optional: enable calling on the channel if your agent needs Teams
 voice (`--enable-calling --calling-web-hook https://.../calls`). Not

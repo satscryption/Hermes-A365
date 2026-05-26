@@ -8,6 +8,14 @@ follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **#47:** operator-visible slice 20 polish. `bot-service create`
+  now defaults `--region` from `az config defaults.location` before
+  falling back to `westeurope`, app-id drift refusal includes
+  paste-ready delete/recreate recovery commands, Path B doctor/status
+  diagnostics stop cascading Azure resource/channel errors after
+  `az account show` fails, and the §11 runbook presents
+  `bot-service create --apply` as the canonical provisioning command
+  with raw `az` calls demoted to implementation/debug detail.
 - **#51:** `SKILL.md` no longer frames A365 CLI 1.1.178 as the
   Microsoft#408 fix floor. The docs now match the conservative
   `doctor` probe and the 2026-05-15 R9 finding: no CLI build is

@@ -25,14 +25,20 @@ class FakeRunner:
         endpoint: str = "https://example.test/api/messages",
         teams: dict[str, Any] | None = None,
         subscription_id: str = SUBSCRIPTION_ID,
+        account_returncode: int = 0,
     ) -> None:
         self.bot_app_id = bot_app_id
         self.endpoint = endpoint
         self.teams = teams or self._teams()
         self.subscription_id = subscription_id
+        self.account_returncode = account_returncode
+        self.calls: list[list[str]] = []
 
     def run(self, argv: list[str], *, timeout: float = 120.0) -> CommandResult:
+        self.calls.append(list(argv))
         if argv[:3] == ["az", "account", "show"]:
+            if self.account_returncode != 0:
+                return CommandResult(argv, self.account_returncode, stderr="Please run 'az login'")
             return self._ok(argv, {"id": self.subscription_id})
         if argv[:3] == ["az", "bot", "show"]:
             return self._ok(
@@ -169,6 +175,32 @@ def test_channel_disabled_surfaces_warn(tmp_path: Path) -> None:
     channel = _by_name(results)["bot_service_channel_msteams"]
     assert channel.state == "warn"
     assert "acceptedTerms/isEnabled" in channel.detail
+
+
+def test_az_account_failure_skips_resource_and_channel_cascade(tmp_path: Path) -> None:
+    sidecar = _write_sidecar(tmp_path)
+    runner = FakeRunner(account_returncode=1)
+
+    results = collect_bot_service_diagnostics(
+        sidecar_path=sidecar,
+        generated_config_path=tmp_path / "a365.generated.config.json",
+        runner=runner,
+        operator_env={"A365_BF_APP_ID": BF_APP_ID},
+        runtime_auth_probe=lambda _config: DiagnosticResult(
+            "bot_service_runtime_auth", "ok", "runtime ok"
+        ),
+    )
+
+    names = [result.name for result in results]
+    assert "bot_service_az_subscription" in names
+    assert "bot_service_resource" not in names
+    assert "bot_service_channel_msteams" not in names
+    assert "bot_service_runtime_auth" in names
+    subscription = _by_name(results)["bot_service_az_subscription"]
+    assert subscription.state == "warn"
+    assert "az login" in subscription.detail
+    assert not any(call[:3] == ["az", "bot", "show"] for call in runner.calls)
+    assert not any(call[:4] == ["az", "bot", "msteams", "show"] for call in runner.calls)
 
 
 def test_runtime_auth_failure_points_to_standalone_bridge_requirement(tmp_path: Path) -> None:
