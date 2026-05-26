@@ -8,6 +8,7 @@ import pytest
 
 from hermes_a365.mutator import AADSTSError, CliInvocationError, RunResult
 from hermes_a365.publish import (
+    _PUBLISH_APPLY_TIMEOUT_SECONDS,
     ADMIN_CENTRE_URL,
     PublishInputs,
     PublishPlan,
@@ -26,6 +27,7 @@ from hermes_a365.publish import (
 class FakeMutator:
     available: bool = True
     calls: list[list[str]] = field(default_factory=list)
+    call_timeouts: list[float] = field(default_factory=list)
     scripted: list[RunResult | Exception] = field(default_factory=list)
 
     def run(
@@ -36,6 +38,7 @@ class FakeMutator:
         stdin_input: str | None = None,
     ) -> RunResult:
         self.calls.append(list(argv))
+        self.call_timeouts.append(timeout)
         if self.scripted:
             nxt = self.scripted.pop(0)
             if isinstance(nxt, Exception):
@@ -235,6 +238,28 @@ class TestApplyPublish:
         mutator = FakeMutator(scripted=[CliInvocationError(["a365"], 7, "boom")])
         with pytest.raises(CliInvocationError):
             apply_publish_plan(plan, mutator=mutator)
+
+
+# ---------------------------------------------------------------------------
+# apply_publish_plan timeout — regression for #52
+# ---------------------------------------------------------------------------
+
+
+class TestApplyPublishPlanTimeout:
+    """Regression for #52: the 180 s override truncated `a365 publish`'s
+    device-code auth fallback. Pin the call site to the named constant
+    so future tightening is intentional, not accidental."""
+
+    def test_uses_named_timeout_constant(self) -> None:
+        plan = build_publish_plan(PublishInputs(agent_name="x"))
+        mutator = FakeMutator()
+        apply_publish_plan(plan, mutator=mutator)
+        assert mutator.call_timeouts == [_PUBLISH_APPLY_TIMEOUT_SECONDS]
+
+    def test_timeout_constant_is_generous_enough_for_device_code(self) -> None:
+        # Microsoft device-code lifetime is 15 min = 900 s. Anything below
+        # 600 s risks truncating valid auth mid-flow on fresh-shell walks.
+        assert _PUBLISH_APPLY_TIMEOUT_SECONDS >= 600.0
 
 
 # ---------------------------------------------------------------------------

@@ -314,6 +314,15 @@ _COPILOT_CHAT_MANIFEST_VERSION = "1.21"
 _COPILOT_CHAT_DEFAULT_SCOPES: tuple[str, ...] = ("copilot", "personal", "team")
 _COPILOT_CHAT_ZIP_INFIX = ".copilot-chat"
 
+# Wall-clock budget for ``a365 publish`` invoked under ``apply_publish_plan``.
+# This is the only interactive call in the wrapper chain — when MSAL cannot
+# silent-token (fresh shell, stale cache), ``a365`` falls back to device-code
+# auth (browser open → sign-in → optional MFA → return), and Microsoft's
+# device-code lifetime is 15 minutes = 900 s. The original 180 s override
+# truncated valid auth flows mid-handshake on every fresh-tenant walk (#52).
+# 900.0 matches both the mutator default and the upstream auth constraint.
+_PUBLISH_APPLY_TIMEOUT_SECONDS = 900.0
+
 
 def _transform_manifest_to_copilot_chat(
     manifest: dict,
@@ -473,7 +482,7 @@ def apply_publish_plan(
     from pathlib import Path
     from shutil import copyfile
 
-    run = mutator.run(plan.step.argv, timeout=180.0)
+    run = mutator.run(plan.step.argv, timeout=_PUBLISH_APPLY_TIMEOUT_SECONDS)
     package_path: str | None = None
     copilot_chat_package_path: str | None = None
     copilot_chat_bot_id: str | None = None

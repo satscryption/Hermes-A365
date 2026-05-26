@@ -8,6 +8,20 @@ follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **#52:** `hermes-a365 publish --apply` no longer truncates the
+  underlying `a365 publish` device-code auth flow at 180 s. The
+  publish step is the only interactive call in the wrapper chain;
+  when MSAL cannot silent-token (fresh shell, stale cache), `a365`
+  falls back to device-code auth (browser open → sign-in → optional
+  MFA → return), and Microsoft's device-code lifetime is 15 min =
+  900 s. The previous 180 s override was *tighter* than the
+  mutator's 900 s default and killed valid auth flows mid-handshake
+  on every fresh-tenant walk. Surfaced by the v0.7.0 release walk
+  Step 3d against the satscryption tenant. The timeout is now a
+  named module constant `_PUBLISH_APPLY_TIMEOUT_SECONDS = 900.0`;
+  regression tests pin the call site to the constant and assert the
+  constant is generous enough (≥ 600 s) to survive accidental
+  tightening.
 - **#50:** `hermes-a365 bot-service cleanup --apply` no longer
   invokes `az bot delete --yes`. The `--yes` argument is rejected by
   `az bot delete` (which is non-interactive by default), so cleanup
