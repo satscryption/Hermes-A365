@@ -4,6 +4,24 @@ All notable changes to the `hermes-a365` skill / plugin live here. Format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- Documented the Path B Copilot Chat reply-delivery model in
+  `references/activity-protocol-shapes.md` (new *Streaming and reply
+  delivery* section): Copilot Chat arrives as `groupChat` and does not
+  render BF streaming, so non-personal turns coalesce into one
+  `send_reply` (#54 / #55), while personal chats stream with
+  single-stream-per-turn + a stale-stream liveness guard (#62);
+  `content_delivered` is unreliable and must be confirmed visually.
+- Refreshed the stale Path B bullet in `SKILL.md` — Copilot Chat is GA
+  since v0.6.0 (provisioned via the `bot-service` wrappers against a
+  separate non-agentic Entra app), not "deferred pending #16".
+- Added §11.9 / §11.10 runbook notes that `bot-service cleanup` does not
+  remove the Managed App Catalog entry (remove it manually via MAC →
+  Agents) and that `az bot delete` propagates immediately.
+
 ## [0.7.2] — 2026-05-29
 
 Copilot Chat reply-quality release. Custom Engine Agent (Copilot

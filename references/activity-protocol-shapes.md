@@ -1,7 +1,8 @@
 # Bot Framework activity shapes
 
 Snapshot date: 2026-05-04 (SPEC §10 Q1 framing); content additions
-through 2026-05-07.
+through 2026-05-07. Path B streaming + reply-delivery section added
+2026-05-29 (v0.7.2).
 
 The activity bridge has shipped — slice 19a `verify`, 19b–19c `serve`
 + reference responder, 19e outbound user-FIC chain, 19m–19o Hermes
@@ -52,6 +53,46 @@ poll. Long-poll TTL is 60 s; the bridge re-subscribes on disconnect.
 | Teams | `text` field has 28 KB cap | Long replies are split or rendered as Adaptive Card. |
 | Outlook | `attachments` may include voice transcripts (preview) | Treat unknown attachment kinds as opaque; do not block reply. |
 | M365 Copilot | `replyToId` semantics differ — Copilot expects threaded replies | Bridge sets `replyToId` from the inbound activity. |
+| M365 Copilot Chat (Custom Engine Agent, Path B) | Arrives as `conversationType=groupChat` with `channelId=msteams` and a `19:…@thread.v2` id — **shape-indistinguishable from a real Teams group chat**. Accepts BF streaming activities (HTTP 2xx) but does **not visibly render** them → silent reply. | Treat non-`personal` turns as non-streaming: coalesce the turn's chunks into one `send_reply`. Never stream to Copilot Chat. See *Streaming and reply delivery* below. |
+
+## Streaming and reply delivery (Path B)
+
+Hermes' gateway stream-consumer produces a reply as a sequence of
+growing chunks. How the bridge puts those on the wire depends on
+whether the conversation actually renders Bot Framework streaming:
+
+- **Personal chats (Teams 1:1, `conversationType=personal`)** render BF
+  streaming. The bridge opens **one** streaming sequence per user turn —
+  a `typing` activity plus `streamType=streaming` / `streamSequence`
+  entities, finalized with `streamType=final` (`Agent365Adapter`'s
+  `REQUIRES_EDIT_FINALIZE` path). Fresh chunk message-ids continue that
+  one sequence instead of starting a second bubble; one-shot
+  progress/fallback sends and separate image activities are suppressed
+  mid-stream (#54). A **stale-stream liveness guard** force-drops a
+  sequence whose finalization repeatedly fails or that exceeds a bounded
+  age, so a stuck stream can't silence the chat (#62).
+
+- **Copilot Chat and other non-`personal` turns** do **not** render BF
+  streaming (see the quirks row above): Bot Framework returns 2xx and
+  the gateway may even log `content_delivered=True`, yet nothing appears
+  in the client. So the bridge **coalesces** the stream-consumer's
+  chunks locally (buffered under a synthetic message id) and emits
+  **one** ordinary `send_reply` when the turn finalizes
+  (`edit_message(finalize=True)`) — one bubble per turn, no streaming
+  (#54). The clean single send also removed the duplicated agent-name
+  lines the old multi-activity fallback produced (#55).
+
+> **`content_delivered` is not ground truth.** It has been observed both
+> false-but-delivered and true-but-not-rendered; validate Path B reply
+> rendering visually in the target client, never from the gateway log
+> alone.
+
+**Known gap (#65):** the coalesce buffer flushes only on
+`edit_message(finalize=True)`. If finalize never fires (consumer error,
+dropped final chunk, crash mid-turn) the buffered reply is never sent —
+there is no timeout/liveness fallback yet, unlike the streaming path's
+guard. Not reproduced in the v0.7.2 branch walk (finalize fired every
+turn); tracked as a robustness follow-up.
 
 ## Adaptive Card targets
 

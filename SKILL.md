@@ -314,14 +314,23 @@ operator-side network exposure options:
   a target-spec built from the persisted `ConversationRegistry`.
   `prune_old_entries` + `pin` / `unpin` / `mark_used` mutators
   let operators manage the registry without restarting.
-- **Path B (Custom Engine Agent) manifest emitter** — shipped
-  2026-05-12 (slice 19u-a, `hermes a365 publish --copilot-chat`);
-  manifest validated by Teams App Catalog upload. **Live Copilot
-  Chat surfacing requires Azure Bot Service registration of the
-  blueprint Entra app**, deferred pending Azure subscription
-  decision (#16). Path B proactive (BF S2S outbound) is also
-  gated on #16 — `_send_proactive` refuses Path B target specs
-  with a clear deferred-error.
+- **Path B (Custom Engine Agent) Copilot Chat** — live since
+  v0.6.0 (#16 / #34 / #36 closed). Provisioned with the
+  `bot-service` wrapper family (`create` / `verify` /
+  `update-endpoint` / `cleanup`; slice 20), which registers an Azure
+  Bot Service against a **separate non-agentic Entra app**
+  (`A365_BF_APP_ID` / `A365_BF_CLIENT_SECRET`) — the blueprint app
+  can't mint BF S2S tokens (`AADSTS82001`), so Path B needs its own
+  identity. Inbound uses the BF-shaped JWT validator branch (#34);
+  outbound replies go via classic BF S2S. **Reply delivery:**
+  Copilot Chat arrives as a `groupChat` and does **not** render BF
+  streaming, so non-personal turns are coalesced into one
+  non-streaming `send_reply` (#54 / #55); Teams 1:1 uses BF streaming
+  with single-stream-per-turn + a stale-stream liveness guard (#62).
+  See [`references/activity-protocol-shapes.md`](references/activity-protocol-shapes.md)
+  → *Streaming and reply delivery*; the §11 runbook in
+  [`references/live-tenant-test.md`](references/live-tenant-test.md)
+  is the operator provisioning walk.
 
 Sibling-plugin lane (Teams group chat / channels / threading /
 file attachments / compose-extension invokes) is **out of scope

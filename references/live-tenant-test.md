@@ -1740,9 +1740,14 @@ hermes-a365 bot-service cleanup \
 #     --confirm "<display-name>"
 ```
 
-The Teams App Catalog entry from §11.7 also needs cleanup —
-[Microsoft Admin Portal](https://admin.microsoft.com) → **Settings**
-→ **Integrated Apps** → select the app → **Remove**.
+The Managed App Catalog entry from §11.7 also needs cleanup — and
+**`bot-service cleanup` does not touch it** (the wrapper uses no MAC
+API), so it must be removed manually:
+[Microsoft Admin Portal](https://admin.microsoft.com) → **Agents** →
+select the agent → **Remove** (the same Agents tab the §11.7 upload
+uses; the Integrated Apps surface only signposts over to Agents, per
+finding 8). Skipping this leaves an orphaned catalog entry — see
+finding 21.
 
 Path A's blueprint Entra app + service principal + agentic-user
 instances remain untouched by `bot-service cleanup`. To tear down
@@ -1806,6 +1811,8 @@ Copilot Chat surfacing, sibling to this validation work).
 | 17 | §11.6 | M365 Copilot Chat surfaced the agent but returned `Oops! Something happened. Can you try again?` until the manifest was republished as v1.1.6 with CEA bot scopes `["copilot", "personal", "team"]` and a `commandLists` entry for `copilot`/`personal`. | #26 tracks updating `_transform_manifest_to_copilot_chat` so generated CEA zips match the shape that walked green. |
 | 18 | §11.8 | **Azure Portal Test in Web Chat blade is not authoritative for this walk.** It stayed stuck on `Connecting` / `Taking longer than usual to connect` across Safari + Chrome on macOS and Edge on Windows, including private/incognito. Rotating WebChatChannel keys and full WebChatChannel delete/recreate did not fix the blade. The recreated WebChatChannel API path itself worked: gateway logged `channel=webchat`, dispatched `Recreated WebChat channel probe: reply OK`, and returned `OK`. | Track upstream with Azure Support via #41. Do not block Hermes-side Path B closure when WebChatChannel API + Teams UI + M365 Copilot Chat UI are green. |
 | 19 | §11.8 | **M365 Copilot Chat and Teams UI walked green.** Gateway logged `Copilot portal probe: reply OK` → `response ready ... response=2 chars`; Teams/M365 messages (`Test message`, `test message`) also produced successful responses. | Final #36 closure evidence. Future wrapper re-walk should target: env propagation, bot-service wrapper create/verify/update, publish wrapper, WebChatChannel API probe, Teams UI, and M365 Copilot Chat UI. |
+| 20 | §11.8 / §11.6 | **Copilot Chat replies fragmented into multiple bubbles per turn, with the agent name duplicated per bubble (v0.7.2 walks, 2026-05-29).** Root cause (instrumented): Copilot Chat arrives as `conversationType=groupChat` (`channelId=msteams`, `19:…@thread.v2`), **not** `personal`; the adapter gated BF streaming to `personal`, so CC fell through to the gateway's non-streaming chunked fallback = one bubble per chunk + the fallback's duplicated name line. Critically, **CC accepts BF streaming (2xx) but does NOT render it** — relaxing the gate to stream to CC made every reply *silent* (PR #63, rejected on its branch walk). | Fixed in v0.7.2 by **coalescing** non-personal chunks into one `send_reply` on finalize (PR #64, #54), which also removed the duplicate name line (#55). `content_delivered=True` proved unreliable — confirm rendering visually. Behaviour documented in [`activity-protocol-shapes.md`](activity-protocol-shapes.md) → *Streaming and reply delivery*. Discipline: walk the PR branch as a pre-merge gate for Path B render changes (unit tests + `content_delivered` were insufficient — they passed for the silent PR #63). |
+| 21 | §11.9 | **`bot-service cleanup` (and `az bot delete`) never touch the Managed App Catalog (2026-05-26/29 walks).** After teardown the bot resource + sidecar are gone, but the MAC **Agents**-tab entry remains an orphan and must be removed manually (MAC → Agents → the agent → Remove). `az bot delete` propagated immediately — no soft-delete window observed (unlike Path A's 30-day AI-Teammate delete). | Operator step; the cleanup wrappers can't remove MAC entries. Documented here + in §11.9. Answers two of §11.9's open Phase-2 questions: `az bot delete` is immediate, and the MAC removal is the per-user-picker lever. Supersedes finding 13's "skip until #34 closes". |
 
 **Reproducing the Direct Line probe** (for finding 11, when #34 dev
 wants to verify the failure mode pre-fix or the success mode post-fix):
