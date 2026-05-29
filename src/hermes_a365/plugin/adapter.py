@@ -129,6 +129,8 @@ def _strip_streaming_cursor(text: str) -> str:
 #
 # Reference: https://learn.microsoft.com/en-us/microsoftteams/platform/bots/streaming-ux
 _STREAMING_MIN_GAP_SEC = 1.5
+_STREAMING_FORCE_DROP_AFTER_SEC = 130.0
+_STREAMING_FINALIZE_MAX_FAILURES = 2
 
 
 # Slice 19q (round-5 walkthrough finding, 2026-05-06): the BF connector
@@ -1164,11 +1166,14 @@ class Agent365Adapter(BasePlatformAdapter):
         bf_stream_id = str(bf_stream_id)
 
         loop = asyncio.get_event_loop()
+        now = loop.time()
         clean_content = _strip_streaming_cursor(content)
         self._streams[bf_stream_id] = {
             "bf_stream_id": bf_stream_id,
             "sequence": 1,
-            "last_emit_ts": loop.time(),
+            "last_emit_ts": now,
+            "opened_ts": now,
+            "finalize_failures": 0,
             # Track last-sent content so auto-finalize-stale-stream has
             # something non-empty to POST as the close (BF rejects
             # empty-text final activities with 400 BadSyntax).
@@ -1379,7 +1384,13 @@ class Agent365Adapter(BasePlatformAdapter):
         state = self._streams.get(message_id)
         is_first = state is None
         if state is None:
-            state = {"bf_stream_id": None, "sequence": 0, "last_emit_ts": 0.0}
+            state = {
+                "bf_stream_id": None,
+                "sequence": 0,
+                "last_emit_ts": 0.0,
+                "opened_ts": loop_now,
+                "finalize_failures": 0,
+            }
             self._streams[message_id] = state
 
         # Throttle — Microsoft recommends 1.5-2 s pacing even though the
@@ -1601,7 +1612,12 @@ class Agent365Adapter(BasePlatformAdapter):
                 "agent365 auto-finalize stale stream %s failed: %s",
                 bf_stream_id, e,
             )
-            return False
+            return self._record_stale_finalize_failure(
+                chat_id=chat_id,
+                message_id=message_id,
+                state=state,
+                reason=str(e),
+            )
 
         if 200 <= resp.status_code < 300:
             logger.info(
@@ -1619,6 +1635,52 @@ class Agent365Adapter(BasePlatformAdapter):
             resp.status_code,
             resp.text[:200] if hasattr(resp, "text") else "",
         )
+        return self._record_stale_finalize_failure(
+            chat_id=chat_id,
+            message_id=message_id,
+            state=state,
+            reason=f"HTTP {resp.status_code}",
+        )
+
+    def _record_stale_finalize_failure(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        state: dict[str, Any],
+        reason: str,
+    ) -> bool:
+        """Return True when the failed stale stream was force-dropped.
+
+        One failed close blocks the replacement stream to avoid
+        knowingly interleaving activities. Repeated failure or an
+        already-expired stream id is treated as dead BF state; force-drop
+        it so the chat cannot wedge forever.
+        """
+        loop_now = asyncio.get_event_loop().time()
+        failures = int(state.get("finalize_failures") or 0) + 1
+        state["finalize_failures"] = failures
+        opened_ts = state.get("opened_ts")
+        if not isinstance(opened_ts, (int, float)):
+            opened_ts = loop_now
+            state["opened_ts"] = opened_ts
+        age = loop_now - float(opened_ts)
+        if (
+            failures >= _STREAMING_FINALIZE_MAX_FAILURES
+            or age >= _STREAMING_FORCE_DROP_AFTER_SEC
+        ):
+            logger.warning(
+                "agent365 force-dropping stale stream after failed finalize: "
+                "chat_id=%s message_id=%s failures=%s age=%.1fs reason=%s",
+                chat_id,
+                message_id,
+                failures,
+                age,
+                reason,
+            )
+            self._drop_stream_state(chat_id, message_id)
+            self._recently_finalized[message_id] = loop_now
+            return True
         return False
 
     def _prune_recently_finalized(self, now: float) -> None:

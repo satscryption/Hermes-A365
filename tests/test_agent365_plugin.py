@@ -10,6 +10,7 @@ upstream Hermes uses for its own unit tests of platform plugins.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 import types
@@ -3516,6 +3517,107 @@ class TestSendStreamStart:
         assert "stale-stream" in a._streams
         assert a._active_stream_by_chat["conv-X3"] == "stale-stream"
         assert send_reply_mock.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_repeated_stale_finalize_failure_force_drops_and_starts_new_stream(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Liveness guard for #54 review feedback: a permanently dead BF
+        # stream id must not wedge the chat forever.
+        a = _make_adapter(monkeypatch)
+        inbound = _make_inbound(conv_id="conv-X4")
+        a._conversations.upsert(adapter_mod.ConversationRef.from_activity(inbound))
+        a._seen_inbounds_this_lifetime.add(inbound["conversation"]["id"])  # 19x-e
+        a._http_client = MagicMock()
+        a._bridge_cfg = MagicMock()
+        a._fmi_cache = MagicMock()
+        a._user_cache = MagicMock()
+        a._bf_token_cache = MagicMock()
+        a._active_stream_by_chat["conv-X4"] = "stale-stream"
+        a._streams["stale-stream"] = {
+            "bf_stream_id": "bf-stale-id",
+            "sequence": 5,
+            "last_emit_ts": 0.0,
+            "last_content": "old content",
+        }
+
+        bridge = adapter_mod._import_bridge()
+        monkeypatch.setattr(
+            bridge,
+            "acquire_reply_token",
+            AsyncMock(return_value=("bearer-x", "A")),
+        )
+        send_reply_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr(bridge, "send_reply", send_reply_mock)
+        a._http_client.post = AsyncMock(
+            side_effect=[
+                MagicMock(status_code=503, text="busy", json=lambda: {}),
+                MagicMock(status_code=503, text="still busy", json=lambda: {}),
+                MagicMock(status_code=201, text="", json=lambda: {"id": "bf-new"}),
+            ]
+        )
+
+        first = await a.send(
+            chat_id="conv-X4", content="new content", reply_to="inbound-id-1"
+        )
+        second = await a.send(
+            chat_id="conv-X4", content="new content", reply_to="inbound-id-1"
+        )
+
+        assert first.success is False
+        assert second.success is True
+        assert second.message_id == "bf-new"
+        assert a._http_client.post.await_count == 3
+        assert "stale-stream" not in a._streams
+        assert "stale-stream" in a._recently_finalized
+        assert a._active_stream_by_chat["conv-X4"] == "bf-new"
+        assert send_reply_mock.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_expired_stale_stream_force_drops_on_first_finalize_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_adapter(monkeypatch)
+        inbound = _make_inbound(conv_id="conv-X5")
+        a._conversations.upsert(adapter_mod.ConversationRef.from_activity(inbound))
+        a._seen_inbounds_this_lifetime.add(inbound["conversation"]["id"])  # 19x-e
+        a._http_client = MagicMock()
+        a._bridge_cfg = MagicMock()
+        a._fmi_cache = MagicMock()
+        a._user_cache = MagicMock()
+        a._bf_token_cache = MagicMock()
+        loop_now = asyncio.get_event_loop().time()
+        a._active_stream_by_chat["conv-X5"] = "stale-stream"
+        a._streams["stale-stream"] = {
+            "bf_stream_id": "bf-stale-id",
+            "sequence": 5,
+            "last_emit_ts": 0.0,
+            "opened_ts": loop_now - adapter_mod._STREAMING_FORCE_DROP_AFTER_SEC - 1.0,
+            "last_content": "old content",
+        }
+
+        bridge = adapter_mod._import_bridge()
+        monkeypatch.setattr(
+            bridge,
+            "acquire_reply_token",
+            AsyncMock(return_value=("bearer-x", "A")),
+        )
+        monkeypatch.setattr(bridge, "send_reply", AsyncMock(return_value=None))
+        a._http_client.post = AsyncMock(
+            side_effect=[
+                MagicMock(status_code=503, text="expired", json=lambda: {}),
+                MagicMock(status_code=201, text="", json=lambda: {"id": "bf-new"}),
+            ]
+        )
+
+        result = await a.send(
+            chat_id="conv-X5", content="new content", reply_to="inbound-id-1"
+        )
+        assert result.success is True
+        assert result.message_id == "bf-new"
+        assert a._http_client.post.await_count == 2
+        assert "stale-stream" not in a._streams
+        assert a._active_stream_by_chat["conv-X5"] == "bf-new"
 
     @pytest.mark.asyncio
     async def test_send_falls_back_to_non_streaming_when_chat_is_not_personal(
