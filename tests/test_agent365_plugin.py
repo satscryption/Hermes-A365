@@ -229,6 +229,21 @@ def _make_inbound(
     }
 
 
+def _make_copilot_chat_inbound(
+    *,
+    conv_id: str = "19:copilot-thread@thread.v2",
+    activity_id: str = "act-cc-1",
+) -> dict[str, Any]:
+    inbound = _make_inbound(
+        conv_id=conv_id,
+        activity_id=activity_id,
+        path="B",
+    )
+    inbound["conversation"]["conversationType"] = "groupChat"
+    inbound["channelData"] = {"tenant": {"id": "tenant-1"}}
+    return inbound
+
+
 # ---------------------------------------------------------------------------
 # Manifest + register (carried over from 19m)
 # ---------------------------------------------------------------------------
@@ -2887,13 +2902,32 @@ class TestEditMessage:
         # if content didn't change.
         assert adapter_mod.Agent365Adapter.REQUIRES_EDIT_FINALIZE is True
 
+    def test_streamable_conversation_allows_personal_and_copilot_group_thread(
+        self,
+    ) -> None:
+        assert adapter_mod._is_streamable_conversation(_make_inbound()) is True
+        assert (
+            adapter_mod._is_streamable_conversation(_make_copilot_chat_inbound())
+            is True
+        )
+
+    def test_streamable_conversation_rejects_regular_group_and_channel(
+        self,
+    ) -> None:
+        group = _make_inbound(conv_id="19:teams-group@thread.v2")
+        group["conversation"]["conversationType"] = "groupChat"
+        group["channelData"] = {"team": {"id": "team-1"}}
+        channel = _make_inbound(conv_id="19:channel@thread.tacv2")
+        channel["conversation"]["conversationType"] = "channel"
+
+        assert adapter_mod._is_streamable_conversation(group) is False
+        assert adapter_mod._is_streamable_conversation(channel) is False
+
     @pytest.mark.asyncio
-    async def test_refuses_non_personal_chat(
+    async def test_refuses_non_streamable_chat(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # BF streaming-ux: "Streaming bot message is available only
-        # for one-on-one chats." Group/channel must hard-fail so
-        # Hermes falls back to send().
+        # Ordinary group/channel shapes stay out of the streaming path.
         a = _make_adapter(monkeypatch)
         inbound = _make_inbound(conv_id="conv-G")
         inbound["conversation"]["conversationType"] = "groupChat"
@@ -2902,9 +2936,42 @@ class TestEditMessage:
 
         r = await a.edit_message("conv-G", "msg-1", "hi", finalize=False)
         assert r.success is False
-        assert "personal chat" in (r.error or "").lower()
+        assert "streaming requires" in (r.error or "").lower()
         # No POST should have been issued.
         assert a._http_client.post.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_accepts_copilot_chat_group_thread(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Live #54 walk: Copilot Chat CEA conversations arrive as
+        # groupChat / 19:...@thread.v2, but BF accepts streaming there.
+        a = _make_adapter(monkeypatch)
+        inbound = _make_copilot_chat_inbound()
+        first_resp = MagicMock(
+            status_code=201,
+            text="",
+            json=lambda: {"id": "bf-cc-stream"},
+        )
+        post_mock = self._wire_adapter(a, inbound=inbound, post_responses=first_resp)
+        self._patch_token_mint(monkeypatch)
+        self._no_sleep(monkeypatch)
+
+        r = await a.edit_message(
+            inbound["conversation"]["id"],
+            "hermes-msg-cc",
+            "Hi",
+            finalize=False,
+        )
+        assert r.success is True
+        assert r.message_id == "bf-cc-stream"
+        assert post_mock.await_count == 1
+        body = post_mock.await_args.kwargs["json"]
+        assert body["type"] == "typing"
+        assert body["entities"][0]["streamType"] == "streaming"
+        assert a._active_stream_by_chat[inbound["conversation"]["id"]] == (
+            "hermes-msg-cc"
+        )
 
     @pytest.mark.asyncio
     async def test_first_call_starts_stream_with_sequence_one_no_streamid(
@@ -3228,8 +3295,8 @@ class TestEditMessage:
 
 class TestSendStreamStart:
     """Slice 19s-bis: send() participates in the same BF stream as
-    edit_message when in a streaming context (personal chat, no active
-    stream for the conversation)."""
+    edit_message when in a streaming context (Teams 1:1 or Copilot
+    Chat CEA thread, no active stream for the conversation)."""
 
     @pytest.mark.asyncio
     async def test_send_starts_stream_in_personal_chat_with_no_active_stream(
@@ -3282,6 +3349,54 @@ class TestSendStreamStart:
         assert "bf-stream-from-send" in a._streams
         assert a._active_stream_by_chat["conv-S1"] == "bf-stream-from-send"
         # send_reply NOT called — we took the streaming path.
+        assert send_reply_mock.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_send_starts_stream_in_copilot_chat_group_thread(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_adapter(monkeypatch)
+        inbound = _make_copilot_chat_inbound(conv_id="19:cc-send@thread.v2")
+        a._conversations.upsert(adapter_mod.ConversationRef.from_activity(inbound))
+        a._seen_inbounds_this_lifetime.add(inbound["conversation"]["id"])  # 19x-e
+        a._http_client = MagicMock()
+        a._bridge_cfg = MagicMock()
+        a._fmi_cache = MagicMock()
+        a._user_cache = MagicMock()
+        a._bf_token_cache = MagicMock()
+
+        bridge = adapter_mod._import_bridge()
+        monkeypatch.setattr(
+            bridge,
+            "acquire_reply_token",
+            AsyncMock(return_value=("bearer-stream", "B")),
+        )
+        send_reply_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr(bridge, "send_reply", send_reply_mock)
+
+        post_mock = AsyncMock(
+            return_value=MagicMock(
+                status_code=201,
+                text="",
+                json=lambda: {"id": "bf-cc-from-send"},
+            )
+        )
+        a._http_client.post = post_mock
+
+        result = await a.send(
+            chat_id="19:cc-send@thread.v2",
+            content="Hello CC",
+            reply_to="inbound-id-1",
+        )
+        assert result.success is True
+        assert result.message_id == "bf-cc-from-send"
+        body = post_mock.await_args.kwargs["json"]
+        assert body["type"] == "typing"
+        assert body["conversation"]["conversationType"] == "groupChat"
+        assert body["entities"][0]["streamType"] == "streaming"
+        assert a._active_stream_by_chat["19:cc-send@thread.v2"] == (
+            "bf-cc-from-send"
+        )
         assert send_reply_mock.await_count == 0
 
     @pytest.mark.asyncio
@@ -3623,7 +3738,7 @@ class TestSendStreamStart:
     async def test_send_falls_back_to_non_streaming_when_chat_is_not_personal(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Group/channel chats: never stream (BF streaming is DM-only).
+        # Ordinary group/channel chats are still not streamable.
         a = _make_adapter(monkeypatch)
         inbound = _make_inbound(conv_id="conv-G")
         inbound["conversation"]["conversationType"] = "groupChat"

@@ -133,6 +133,49 @@ _STREAMING_FORCE_DROP_AFTER_SEC = 130.0
 _STREAMING_FINALIZE_MAX_FAILURES = 2
 
 
+_COPILOT_CHAT_CHANNEL_IDS: frozenset[str] = frozenset(
+    {"m365copilot", "copilot", "copilotchat"}
+)
+
+
+def _is_copilot_chat_group_thread(activity: dict[str, Any]) -> bool:
+    """Return True for Copilot Chat's groupChat-shaped 1:1 thread.
+
+    Live #54 walk: Copilot Chat CEA conversations arrive as
+    ``conversationType='groupChat'`` with a Teams-style
+    ``19:...@thread.v2`` id. Keep this narrower than "all groupChat"
+    so ordinary Teams group/channel conversations do not silently move
+    onto the streaming path without their own live validation.
+    """
+    raw_conv = activity.get("conversation")
+    conv = raw_conv if isinstance(raw_conv, dict) else {}
+    if str(conv.get("conversationType") or "") != "groupChat":
+        return False
+
+    channel_id = str(activity.get("channelId") or "").lower()
+    if channel_id in _COPILOT_CHAT_CHANNEL_IDS:
+        return True
+
+    conv_id = str(conv.get("id") or "")
+    if not (conv_id.startswith("19:") and conv_id.endswith("@thread.v2")):
+        return False
+
+    raw_channel_data = activity.get("channelData")
+    channel_data = raw_channel_data if isinstance(raw_channel_data, dict) else {}
+    # Teams channel conversations include team/channel metadata. A plain
+    # thread without that metadata matches the live Copilot Chat shape.
+    return not isinstance(channel_data.get("team"), dict) and not isinstance(
+        channel_data.get("channel"), dict
+    )
+
+
+def _is_streamable_conversation(activity: dict[str, Any]) -> bool:
+    raw_conv = activity.get("conversation")
+    conv = raw_conv if isinstance(raw_conv, dict) else {}
+    conv_type = str(conv.get("conversationType") or "")
+    return conv_type == "personal" or _is_copilot_chat_group_thread(activity)
+
+
 # Slice 19q (round-5 walkthrough finding, 2026-05-06): the BF connector
 # delivers a handful of activities that aren't user messages and
 # shouldn't reach the Hermes agent loop:
@@ -839,14 +882,16 @@ class Agent365Adapter(BasePlatformAdapter):
         Path A only — Path B (Custom Engine Agent via Azure Bot Service)
         proactive is gated on #16 and returns a clear deferred-error.
 
-        Slice 19s-bis: in personal chats with no active stream for the
-        conversation, ``send()`` emits a BF streaming-start activity
-        (typing + streaminfo + streamSequence:1) and captures the
-        returned ``streamId``. Subsequent ``edit_message`` calls
-        continue that same stream rather than creating a separate one.
-        This satisfies Microsoft's "one streaming sequence per user
-        turn" rule (custom-engine-agents doc) and gives a single
-        growing bubble per Hermes segment.
+        Slice 19s-bis + #54: in streamable chats with no active stream
+        for the conversation, ``send()`` emits a BF streaming-start
+        activity (typing + streaminfo + streamSequence:1) and captures
+        the returned ``streamId``. Streamable means Teams 1:1
+        ``personal`` plus Copilot Chat's live-observed
+        ``groupChat``/``19:...@thread.v2`` CEA shape. Subsequent
+        ``edit_message`` calls continue that same stream rather than
+        creating a separate one. This satisfies Microsoft's "one
+        streaming sequence per user turn" rule (custom-engine-agents
+        doc) and gives a single growing bubble per Hermes segment.
 
         Suppress one-shot non-streaming sends while a stream is active;
         Copilot Chat renders interleaved progress/fallback activities
@@ -854,7 +899,7 @@ class Agent365Adapter(BasePlatformAdapter):
         finalize the prior stream successfully before opening another.
 
         Fallback to a non-streaming ``message`` activity when:
-        - ``chat_type != "personal"`` (BF streaming is DM-only).
+        - the inbound is not streamable (not Teams 1:1 or Copilot Chat CEA).
         - The streaming-start POST itself fails.
         """
         bridge = _import_bridge()
@@ -895,8 +940,7 @@ class Agent365Adapter(BasePlatformAdapter):
         # for them creates a "typing" activity that never closes,
         # leaving the user's surface stuck in the streaming indicator
         # until Microsoft's 2-min cap fires.
-        conv = inbound.get("conversation") or {}
-        chat_type = str(conv.get("conversationType") or "")
+        streamable = _is_streamable_conversation(inbound)
 
         # Slice 19s-bis follow-up — Hermes' stream consumer occasionally
         # starts a fresh segment (segment break, interim_assistant_messages,
@@ -932,7 +976,7 @@ class Agent365Adapter(BasePlatformAdapter):
                 )
 
         if (
-            chat_type == "personal"
+            streamable
             and reply_to is not None
             and chat_id not in self._active_stream_by_chat
         ):
@@ -1317,7 +1361,7 @@ class Agent365Adapter(BasePlatformAdapter):
 
         Returns ``SendResult(success=False, ...)`` and falls back to
         ``send()`` on:
-        - non-personal chat types (BF streaming is DM-only),
+        - non-streamable chat types,
         - missing cached inbound (proactive sends with no prior turn),
         - terminal 403 ``ContentStreamNotAllowed`` (2-min timeout,
           stop-button cancel, oversize message),
@@ -1342,14 +1386,17 @@ class Agent365Adapter(BasePlatformAdapter):
         # mark the conversation as recently used so prune respects it.
         self._conversations.mark_used(chat_id)
 
-        # DM-only: BF streaming-ux doc:
-        # "Streaming bot message is available only for one-on-one chats."
-        conv = inbound.get("conversation") or {}
-        if str(conv.get("conversationType") or "") != "personal":
+        # Teams streaming-ux docs describe personal chats only, but the
+        # 2026-05-29 #54 live walk proved Copilot Chat CEA conversations
+        # arrive as groupChat threads and accept the same streaming
+        # protocol. Keep other group/channel shapes out until separately
+        # walked.
+        if not _is_streamable_conversation(inbound):
             return SendResult(
                 success=False,
-                error="streaming requires personal chat",
+                error="streaming requires Teams 1:1 or Copilot Chat thread",
             )
+        conv = inbound.get("conversation") or {}
 
         if self._http_client is None or self._bridge_cfg is None:
             return SendResult(

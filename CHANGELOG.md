@@ -16,7 +16,10 @@ follow [SemVer](https://semver.org/spec/v2.0.0.html).
   image activities are blocked mid-stream, and stale-stream
   finalization must succeed before a replacement stream can start
   unless bounded retry/age guards identify the stale stream as dead
-  and force-drop it to preserve chat liveness.
+  and force-drop it to preserve chat liveness. The stream gate now
+  also accepts Copilot Chat's live-observed `groupChat`
+  `19:...@thread.v2` CEA conversation shape while leaving ordinary
+  Teams group/channel shapes on the non-streaming path.
 - **#26:** `publish --copilot-chat` now supports
   `--manifest-id auto|<guid>` so operators can publish AI Teammate
   and Custom Engine Agent zips side-by-side without Teams App Catalog
