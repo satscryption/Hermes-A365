@@ -4,7 +4,17 @@ All notable changes to the `hermes-a365` skill / plugin live here. Format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.2] — 2026-05-29
+
+Copilot Chat reply-quality release. Custom Engine Agent (Copilot
+Chat) replies that previously fragmented into multiple bubbles per
+turn now arrive as a single message, and the duplicated agent-name
+lines are gone. Path B streaming also gained a stale-stream liveness
+guard, side-by-side AI Teammate + Copilot Chat publishing landed, and
+non-2xx Bot Framework reply POSTs are now treated as failures.
+Validated end-to-end against the live tenant via a pre-merge branch
+walk — Copilot Chat rendered one bubble per turn across 7+ turns
+(including multi-tool replies) while Teams 1:1 streaming was preserved.
 
 ### Fixed
 
@@ -21,6 +31,15 @@ follow [SemVer](https://semver.org/spec/v2.0.0.html).
   streaming activities, non-personal stream-consumer chunks are now
   buffered locally and emitted as one normal `send_reply()` only on
   `edit_message(finalize=True)`.
+- **#55:** Copilot Chat replies no longer repeat the agent
+  display-name line. With non-personal turns coalesced into one
+  `send_reply()` (see #54), the duplicate name-lines produced by the
+  old multi-activity stream-consumer fallback no longer appear —
+  confirmed in the #54 branch walk.
+- **#62:** Path B streaming gained a stale-stream liveness guard. A
+  stream whose finalization repeatedly fails, or that exceeds a
+  bounded age, is force-dropped so a fresh turn can start — preventing
+  a stuck stream from silencing the chat.
 - **#26:** `publish --copilot-chat` now supports
   `--manifest-id auto|<guid>` so operators can publish AI Teammate
   and Custom Engine Agent zips side-by-side without Teams App Catalog
