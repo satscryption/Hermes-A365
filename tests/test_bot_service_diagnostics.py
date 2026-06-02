@@ -120,7 +120,8 @@ def test_partial_sidecar_reports_config_error(tmp_path: Path) -> None:
 
     assert results[0].name == "bot_service_config"
     assert results[0].state == "error"
-    assert "missing required fields" in results[0].detail
+    assert "missing required keys" in results[0].detail
+    assert "subscriptionId" in results[0].detail
 
 
 def test_detects_msa_app_id_drift_from_generated_path_b_identity(tmp_path: Path) -> None:

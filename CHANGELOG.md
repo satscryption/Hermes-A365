@@ -15,6 +15,12 @@ follow [SemVer](https://semver.org/spec/v2.0.0.html).
   M365 Admin Centre upload → per-user activation). README + SKILL.md +
   `references/a365-cli-reference.md` no longer claim `register
   --aiteammate` creates the agentic Entra user.
+- **#48:** Slice 21b internal cleanup tightened Bot Service cleanup and
+  diagnostics maintenance seams: generated-config help now documents
+  the cwd default, cleanup uses a structured blueprint-preserved flag
+  instead of message substring matching, bot-service cleanup argv is
+  explicitly render-only, and diagnostics reuses the sidecar dataclass
+  required-field validation.
 
 ### Fixed
 

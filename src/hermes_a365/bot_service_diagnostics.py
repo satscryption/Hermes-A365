@@ -20,14 +20,6 @@ _ERROR = "error"
 
 _HERMES_HOME_ENV = "HERMES_HOME"
 _HERMES_HOME_DEFAULT = "~/.hermes"
-_REQUIRED_SIDECAR_FIELDS = (
-    "subscriptionId",
-    "resourceGroup",
-    "botName",
-    "msaAppId",
-    "messagingEndpoint",
-    "armResourceId",
-)
 
 
 @dataclass
@@ -70,29 +62,6 @@ def _load_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
 def probe_bot_service_config(
     sidecar_path: Path,
 ) -> tuple[DiagnosticResult, bot_service.BotServiceConfig | None]:
-    raw, error = _load_json_object(sidecar_path)
-    if error is not None or raw is None:
-        return (
-            DiagnosticResult(
-                "bot_service_config",
-                _ERROR,
-                f"{sidecar_path} {error}",
-                {"sidecar": str(sidecar_path)},
-            ),
-            None,
-        )
-
-    missing = [key for key in _REQUIRED_SIDECAR_FIELDS if not str(raw.get(key) or "").strip()]
-    if missing:
-        return (
-            DiagnosticResult(
-                "bot_service_config",
-                _ERROR,
-                f"{sidecar_path} missing required fields: {missing}",
-                {"sidecar": str(sidecar_path), "missing_fields": missing},
-            ),
-            None,
-        )
     try:
         config = bot_service.BotServiceConfig.from_file(sidecar_path)
     except bot_service.BotServiceError as e:
