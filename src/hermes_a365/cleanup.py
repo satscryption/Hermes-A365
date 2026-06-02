@@ -171,6 +171,8 @@ _DESCRIPTIONS: dict[CleanupKind, str] = {
 
 def _step_argv(kind: CleanupKind, inputs: CleanupInputs) -> list[str]:
     if kind == "bot-service":
+        # Render-only: top-level apply calls bot_service.apply_cleanup_plan()
+        # directly so it can share the in-process runner/test seam.
         return [
             "hermes-a365",
             "bot-service",
@@ -367,8 +369,13 @@ def apply_cleanup_plan(
             bs_result = bot_service.apply_cleanup_plan(bs_plan, runner=bot_service_runner)
             result.completed.append(step.kind)
             blueprint_teardown_requested = "blueprint" in plan.inputs.kinds
+            preserved_message = (
+                bs_result.blueprint_preserved_message
+                if blueprint_teardown_requested and bs_result.blueprint_preserved
+                else None
+            )
             for message in bs_result.messages:
-                if blueprint_teardown_requested and "Blueprint Entra app" in message:
+                if message == preserved_message:
                     continue
                 result.messages.append(message)
             if blueprint_teardown_requested:

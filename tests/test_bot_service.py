@@ -27,6 +27,7 @@ from hermes_a365.bot_service import (
     build_cleanup_plan,
     build_create_plan,
     build_enable_channel_plan,
+    build_parser,
     build_update_endpoint_plan,
     derive_bot_name,
     resolve_default_region,
@@ -413,6 +414,8 @@ def test_cleanup_apply_deletes_bot_and_backs_up_sidecar(tmp_path: Path) -> None:
     assert result.sidecar_backup_path.exists()
     assert a365_config.exists()
     assert any(call[:3] == ["az", "bot", "delete"] for call in runner.calls)
+    assert result.blueprint_preserved is True
+    assert result.blueprint_preserved_message is not None
     assert any("Blueprint Entra app" in message for message in result.messages)
 
 
@@ -437,6 +440,21 @@ def test_cleanup_calls_az_bot_delete_without_yes_flag(tmp_path: Path) -> None:
         assert "--yes" not in call, (
             f"az bot delete must not be invoked with --yes; got {call}"
         )
+
+
+def test_verify_generated_config_help_documents_cwd_default(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args(["verify", "--help"])
+
+    assert excinfo.value.code == 0
+    help_text = capsys.readouterr().out
+    help_flat = " ".join(help_text.split())
+    assert "--generated-config" in help_text
+    assert "./a365.generated.config.json" in help_text
+    assert "current working" in help_flat
+    assert "another cwd" in help_flat
 
 
 def test_cleanup_apply_is_noop_when_sidecar_missing(tmp_path: Path) -> None:

@@ -398,6 +398,8 @@ class BotServiceCleanupResult:
     resource_group_deleted: bool = False
     sidecar_backup_path: Path | None = None
     sidecar_removed: bool = False
+    blueprint_preserved: bool = False
+    blueprint_preserved_message: str | None = None
     messages: list[str] = field(default_factory=list)
 
 
@@ -1113,14 +1115,22 @@ def apply_cleanup_plan(
 
     inputs = plan.inputs
     result = BotServiceCleanupResult(sidecar_path=inputs.sidecar_path)
+
+    def record_blueprint_preserved() -> None:
+        message = (
+            "[apply] Blueprint Entra app + service principal preserved — "
+            "Path A still depends on it"
+        )
+        result.blueprint_preserved = True
+        result.blueprint_preserved_message = message
+        result.messages.append(message)
+
     config = plan.config
     if config is None:
         result.messages.append(
             f"[apply] no bot-service sidecar at {inputs.sidecar_path}; nothing to clean up"
         )
-        result.messages.append(
-            "[apply] Blueprint Entra app + service principal preserved — Path A still depends on it"
-        )
+        record_blueprint_preserved()
         return result
 
     bot = _bot_show(runner, config.resourceGroup, config.botName)
@@ -1173,9 +1183,7 @@ def apply_cleanup_plan(
         result.messages.append(f"[apply] backed up sidecar to {backup}")
         result.messages.append(f"[apply] removed {inputs.sidecar_path}")
 
-    result.messages.append(
-        "[apply] Blueprint Entra app + service principal preserved — Path A still depends on it"
-    )
+    record_blueprint_preserved()
     return result
 
 
@@ -1577,7 +1585,11 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         "--generated-config",
         type=Path,
         default=Path.cwd() / "a365.generated.config.json",
-        help="Path A generated config for endpoint parity check",
+        help=(
+            "Path A generated config for endpoint parity check "
+            "(default: ./a365.generated.config.json in the current working "
+            "directory; pass this when running verify from another cwd)"
+        ),
     )
     verify.add_argument(
         "--directline-probe",

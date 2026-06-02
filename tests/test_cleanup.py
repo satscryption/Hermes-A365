@@ -394,6 +394,11 @@ class TestApplyCleanup:
         assert bot_runner.calls[0][:3] == ["az", "bot", "show"]
         assert [argv[3] for argv in mutator.calls] == ["azure", "instance", "blueprint"]
         assert not sidecar.exists()
+        assert not any("Blueprint Entra app" in message for message in result.messages)
+        assert any(
+            "bot-service cleanup complete before blueprint teardown" in message
+            for message in result.messages
+        )
 
     def test_kinds_can_scope_bot_service_and_instance(self, tmp_path: Path) -> None:
         _seed_agent_dir(tmp_path)
@@ -416,6 +421,7 @@ class TestApplyCleanup:
 
         assert result.completed == ["bot-service", "instance"]
         assert [argv[3] for argv in mutator.calls] == ["instance"]
+        assert any("Blueprint Entra app" in message for message in result.messages)
 
     def test_chmods_secret_bearing_backups_to_600(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
