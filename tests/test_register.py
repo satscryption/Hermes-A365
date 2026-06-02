@@ -181,6 +181,18 @@ class TestCliAiteammateUnsupported:
         assert AITEAMMATE_REGISTER_UNSUPPORTED in captured.err
         assert "a365 setup blueprint" not in captured.out
 
+    def test_dry_run_rejects_aiteammate_before_plan_render(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        args = build_parser().parse_args(["--agent-name", "x", "--aiteammate"])
+
+        rc = run(args)
+
+        assert rc == 2
+        captured = capsys.readouterr()
+        assert AITEAMMATE_REGISTER_UNSUPPORTED in captured.err
+        assert "a365 setup blueprint" not in captured.out
+
 
 class TestPlanRender:
     def test_human_lists_steps_and_argv(self) -> None:

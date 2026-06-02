@@ -117,7 +117,7 @@ class RegisterInputs:
     agent_name: str
     tenant_id: str | None = None  # None → CLI auto-detects from `az account show`
     m365: bool = False  # register messaging endpoint via MCP Platform
-    aiteammate: bool = False  # Deprecated/unsupported on register; see __post_init__.
+    aiteammate: bool = False  # Parser back-compat; rejected in __post_init__.
     authmode: str = "obo"  # obo / s2s / both — only used by `setup all`, kept here for config
     no_endpoint: bool = False  # blueprint-only; skip endpoint registration
     skip_requirements: bool = False  # pass --skip-requirements to setup blueprint
