@@ -4,7 +4,19 @@ All notable changes to the `hermes-a365` skill / plugin live here. Format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.3] — 2026-06-02
+
+Cleanup + correctness release on top of v0.7.2. `register --aiteammate`
+becomes an explicit unsupported surface with a redirect at the real AI
+Teammate flow (was a misleading no-op). Slice 20's Bot Service cleanup
+and diagnostics seams tightened — structured `blueprint_preserved` flag
+instead of substring matching, single source of truth for sidecar
+required-field validation. The new non-personal coalesced reply buffer
+gains a liveness watchdog so a missing `edit_message(finalize=True)` no
+longer leaves a silent pending reply. Plus a comprehensive
+documentation sweep across `README.md` and all reference docs capturing
+the post-v0.6.0 Path B GA state and the Copilot Chat `groupChat` shape
+finding.
 
 ### Changed
 
